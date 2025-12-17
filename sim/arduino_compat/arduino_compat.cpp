@@ -76,6 +76,11 @@ static void maybe_clock_edge_update() {
     // Update target based on what it sees.
     r.target.on_swclk_rising_edge(host_driving, swdio.level);
 
+    // If the target sampled a host-driven bit at this edge, emit a marker event.
+    if (r.target.consume_sampled_host_bit_flag()) {
+      r.logger.log_event(r.t_ns, "SWDIO_SAMPLE_T", 3.42);
+    }
+
     // Apply target driving decision into GPIO model.
     if (r.target.drive_enabled()) {
       r.gpio.target_drive_swdio(true, r.target.drive_level());
@@ -151,6 +156,8 @@ int digitalRead(int pin) {
   auto &r = sim::rt();
   if (pin == r.swdio_pin) {
     const auto swdio = r.gpio.resolve_swdio(r.swdio_pin);
+    // Host sampling marker at the exact time the host reads SWDIO.
+    r.logger.log_event(r.t_ns, "SWDIO_SAMPLE_H", 3.42);
     return swdio.level;
   }
 

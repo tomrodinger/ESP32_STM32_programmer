@@ -9,6 +9,12 @@ Create a macOS-hosted simulator that:
 3. Logs **resolved SWCLK/SWDIO voltages vs time** to a file.
 4. Simulates an STM32 SWD target sufficiently to respond to **DP IDCODE read**.
 5. Provides a separate visualization tool with **pan + zoom**.
+6. Overlays **sampling markers** on the SWDIO plot to show when the host and simulated target *sampled* SWDIO.
+
+Notes on sampling markers:
+
+- **Host sample time** is defined as the timestamp of the simulator’s implementation of [`digitalRead()`](sim/arduino_compat/arduino_compat.cpp:150) when reading the SWDIO pin. This corresponds to the exact sampling point in the host algorithm (see [`swd_min::read_bit()`](src/swd_min.cpp:61) -> [`swdio_read()`](src/swd_min.cpp:35)).
+- **Target sample time** is defined as the timestamp of the simulated target’s SWCLK rising-edge handler when it is consuming host-driven bits (see [`sim::Stm32SwdTarget::on_swclk_rising_edge()`](sim/stm32_swd_target.cpp:32)). This is simulator-only logic and does not need to match ESP32 constraints.
 
 ## Voltage encoding (as required)
 
@@ -139,11 +145,24 @@ IDCODE constant will be configurable in `stm32_swd_target`.
 
 ## Log format
 
-Write `signals.csv` with rows only when a resolved voltage changes:
+Write `signals.csv` as an event log:
 
 - `t_ns,signal,voltage`
 
+### Voltage waveforms
+
+For waveform signals, write rows only when a resolved voltage changes.
+
 Where `signal` is one of: `SWCLK`, `SWDIO`, `NRST`.
+
+### Sampling marker events
+
+Additionally, write **point events** (not step waveforms) for sampling instants:
+
+- `t_ns,SWDIO_SAMPLE_H,3.420` (host sampled SWDIO)
+- `t_ns,SWDIO_SAMPLE_T,3.420` (simulated target sampled SWDIO)
+
+These y-values are chosen to sit near the top of the SWDIO axis (which is fixed to `[-0.2, 3.6]` in the viewer) so markers are visible without obscuring the SWDIO voltage encoding.
 
 ## Viewer tool (pan + zoom)
 
@@ -153,7 +172,13 @@ Implementation: Python + Plotly -> generates a self-contained `waveforms.html`.
 - Behavior:
   - reads `signals.csv`
   - reconstructs step-wise waveforms
+  - overlays SWDIO sampling markers from `SWDIO_SAMPLE_H` and `SWDIO_SAMPLE_T` events on the **same subplot** as SWDIO
   - writes `waveforms.html` and attempts to open it
+
+Marker style in the viewer (implemented):
+
+- Host sample: blue circle marker with centered text `H`.
+- Target sample: orange circle marker with centered text `T`.
 
 Controls (trackpad-focused):
 

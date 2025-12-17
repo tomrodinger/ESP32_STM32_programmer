@@ -168,6 +168,16 @@ def main():
         subplot_titles=want,
     )
 
+    # Helper: collect point-events for a given signal.
+    def collect_points(sig_name):
+        xs = []
+        ys = []
+        for t, sig, v in events:
+            if sig == sig_name:
+                xs.append(t)
+                ys.append(v)
+        return xs, ys
+
     for i, sig in enumerate(want, start=1):
         xs, ys = build_step_series(events, sig, end_t)
         fig.add_trace(
@@ -181,13 +191,62 @@ def main():
             row=i,
             col=1,
         )
+
+        # Overlay SWDIO sampling markers on the SWDIO subplot.
+        if sig == "SWDIO":
+            if "SWDIO_SAMPLE_H" in signals:
+                hx, hy = collect_points("SWDIO_SAMPLE_H")
+                fig.add_trace(
+                    go.Scatter(
+                        x=hx,
+                        y=hy,
+                        mode="markers+text",
+                        name="Host sample",
+                        text=["H"] * len(hx),
+                        textposition="middle center",
+                        textfont=dict(size=10, color="white"),
+                        marker=dict(
+                            symbol="circle",
+                            size=12,
+                            color="#1f77b4",
+                            line=dict(color="#1f77b4", width=1),
+                        ),
+                        hovertemplate="t=%{x} ns<br>Host sample<extra></extra>",
+                    ),
+                    row=i,
+                    col=1,
+                )
+
+            if "SWDIO_SAMPLE_T" in signals:
+                tx, ty = collect_points("SWDIO_SAMPLE_T")
+                fig.add_trace(
+                    go.Scatter(
+                        x=tx,
+                        y=ty,
+                        mode="markers+text",
+                        name="Target sample",
+                        text=["T"] * len(tx),
+                        textposition="middle center",
+                        textfont=dict(size=10, color="white"),
+                        marker=dict(
+                            symbol="circle",
+                            size=12,
+                            color="#ff7f0e",
+                            line=dict(color="#ff7f0e", width=1),
+                        ),
+                        hovertemplate="t=%{x} ns<br>Target sample<extra></extra>",
+                    ),
+                    row=i,
+                    col=1,
+                )
+
         fig.update_yaxes(title_text="V", row=i, col=1, range=[-0.2, 3.6], fixedrange=True)
 
     # Constrain interactions to X only.
     fig.update_layout(
         title=f"SWD Waveforms from {path}",
         height=250 * len(want) + 150,
-        showlegend=False,
+        showlegend=True,
         hovermode="x unified",
         dragmode="pan",
     )

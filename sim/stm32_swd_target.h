@@ -15,6 +15,10 @@ public:
   // host_level is the logic level on SWDIO as seen at that edge.
   void on_swclk_rising_edge(bool host_driving, uint8_t host_level);
 
+  // Marker helper: true if the target sampled a host-driven bit on the last edge.
+  // Consumed by the simulator shim for waveform overlay; cleared when read.
+  bool consume_sampled_host_bit_flag();
+
   // Target drive control for SWDIO.
   bool drive_enabled() const { return drive_en_; }
   uint8_t drive_level() const { return drive_level_; }
@@ -61,6 +65,8 @@ private:
 
   bool drive_en_ = false;
   uint8_t drive_level_ = 1;
+
+  bool sampled_host_bit_ = false;
 };
 
 } // namespace sim

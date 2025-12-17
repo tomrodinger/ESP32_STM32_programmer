@@ -27,9 +27,17 @@ void Stm32SwdTarget::reset() {
   parity_bit_ = 0;
   drive_en_ = false;
   drive_level_ = 1;
+  sampled_host_bit_ = false;
+}
+
+bool Stm32SwdTarget::consume_sampled_host_bit_flag() {
+  const bool v = sampled_host_bit_;
+  sampled_host_bit_ = false;
+  return v;
 }
 
 void Stm32SwdTarget::on_swclk_rising_edge(bool host_driving, uint8_t host_level) {
+  sampled_host_bit_ = false;
   // Detect line reset: consecutive cycles where host drives SWDIO high.
   // Important: line reset is used both *before* and *after* SWD is enabled.
   //  - Before SWD enabled: line reset is typically followed by 0xE79E.
@@ -78,6 +86,8 @@ void Stm32SwdTarget::on_swclk_rising_edge(bool host_driving, uint8_t host_level)
         // Ignore if host released (shouldn't happen during sequence)
         return;
       }
+      sampled_host_bit_ = true;
+
       // Shift in LSB-first bits of the 16-bit sequence.
       seq_shift_ |= (uint16_t)(host_level & 1u) << seq_bits_;
       seq_bits_++;
@@ -105,6 +115,8 @@ void Stm32SwdTarget::on_swclk_rising_edge(bool host_driving, uint8_t host_level)
         // We expect this once we've collected 8 bits.
         return;
       }
+
+      sampled_host_bit_ = true;
 
       // Collect 8-bit request header (LSB-first)
       req_shift_ |= (uint8_t)(host_level & 1u) << req_bits_;

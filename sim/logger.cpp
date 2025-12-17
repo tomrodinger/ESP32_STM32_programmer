@@ -22,4 +22,8 @@ void CsvLogger::log_voltage_change(uint64_t t_ns, const std::string &signal, dou
   out_ << t_ns << "," << signal << "," << voltage << "\n";
 }
 
+void CsvLogger::log_event(uint64_t t_ns, const std::string &signal, double value) {
+  out_ << t_ns << "," << signal << "," << value << "\n";
+}
+
 } // namespace sim
