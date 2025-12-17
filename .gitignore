@@ -1,0 +1,47 @@
+# macOS
+.DS_Store
+
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# Build artifacts / logs
+build/
+**/build/
+*.o
+*.obj
+*.elf
+*.map
+*.a
+*.so
+*.d
+*.dep
+*.log
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# VS Code
+.vscode/
+
+# Docs / planning notes (do not commit)
+PLAN_*.md
+
+# Local scratch / failed attempts (do not commit)
+src_failed_attempt/
+src_failed_attempt_2/
+
+# Temporary files
+*.swp
+*.swo
+*~

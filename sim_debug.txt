@@ -1,0 +1,1 @@
+DEBUG: saw non-host SWDIO voltage at t_ns=43125000 V=3.200
