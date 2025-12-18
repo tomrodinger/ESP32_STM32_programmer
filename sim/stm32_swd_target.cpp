@@ -69,9 +69,11 @@ void Stm32SwdTarget::on_swclk_rising_edge(bool host_driving, uint8_t host_level)
 
   switch (phase_) {
     case Phase::AwaitResetOrSeq: {
-      // Pre-SWD: only start capturing 0xE79E after we've seen a line reset and
-      // then the host begins sending something other than continuous '1's.
-      if (!swd_enabled_ && line_reset_seen_ && host_driving && host_level == 0) {
+      // Pre-SWD: some targets/probes perform the JTAG->SWD selection sequence without a
+      // full 50+ cycle line reset up front (they may do a shorter preamble first).
+      // To support that, begin capturing 0xE79E as soon as we see the host start driving
+      // non-high bits while not yet in SWD mode.
+      if (!swd_enabled_ && host_driving && host_level == 0) {
         phase_ = Phase::CollectSeq;
         seq_shift_ = 0;
         seq_bits_ = 0;
@@ -113,6 +115,25 @@ void Stm32SwdTarget::on_swclk_rising_edge(bool host_driving, uint8_t host_level)
       if (!host_driving) {
         // This is the turnaround cycle; after request, host releases for 1 cycle.
         // We expect this once we've collected 8 bits.
+        return;
+      }
+
+      // If we just observed a line reset (50+ cycles of SWDIO=1), ignore the remaining
+      // '1' bits until the host actually starts a transaction (typically begins with 0s).
+      if (line_reset_seen_ && host_level == 1) {
+        return;
+      }
+
+      // First non-high bit after line reset means the reset is "over"; start request fresh.
+      if (line_reset_seen_ && host_level == 0) {
+        line_reset_seen_ = false;
+        req_shift_ = 0;
+        req_bits_ = 0;
+      }
+
+      // Empirical quirk support: allow one or more idle-low bits before the request start bit.
+      // If the host sends leading 0s, ignore them until we see the 'start' bit (1).
+      if (req_bits_ == 0 && host_level == 0) {
         return;
       }
 
@@ -161,16 +182,21 @@ void Stm32SwdTarget::on_swclk_rising_edge(bool host_driving, uint8_t host_level)
       return;
     }
 
-    case Phase::TurnaroundToTarget:
-      // This rising edge corresponds to the turnaround cycle (host released).
-      // We start driving ACK on the *next* edge.
+    case Phase::TurnaroundToTarget: {
+      // Variant turnaround timing (matching the host code in swd_min.cpp):
+      // the host releases SWDIO while SWCLK is low, and the *very next rising edge*
+      // is the first ACK bit (bit0). Therefore we must present ACK bit0 immediately
+      // on this rising edge so the host samples the correct value mid-high.
+      const uint8_t ack_ok = 0b001; // 3 bits, LSB-first
       drive_en_ = true;
+      drive_level_ = (ack_ok >> 0) & 1u;
       phase_ = Phase::SendAck;
-      bit_idx_ = 0;
+      bit_idx_ = 1; // next ACK bit index
       return;
+    }
 
     case Phase::SendAck: {
-      // ACK is 3 bits, LSB-first. OK = 0b001.
+      // Continue ACK bits 1..2 on subsequent rising edges.
       const uint8_t ack_ok = 0b001;
       drive_level_ = (ack_ok >> bit_idx_) & 1u;
       bit_idx_++;

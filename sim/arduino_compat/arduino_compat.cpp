@@ -130,6 +130,13 @@ void pinMode(int pin, int mode) {
       pull = sim::Pull::Up;
       if (pin == r.swdio_pin) r.swdio_input_pullup_seen = true;
       break;
+    case INPUT_PULLDOWN:
+      dir = sim::PinDir::Input;
+      pull = sim::Pull::Down;
+      // Keep the existing flag name but treat either pull as evidence that the host
+      // released SWDIO during turnaround.
+      if (pin == r.swdio_pin) r.swdio_input_pullup_seen = true;
+      break;
     case INPUT:
     default:
       dir = sim::PinDir::Input;

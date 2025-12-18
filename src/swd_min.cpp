@@ -24,8 +24,13 @@ static inline void swdio_output() {
 }
 
 static inline void swdio_input_pullup() {
-  // SWDIO must be released during turnaround; a pull-up keeps it from floating.
-  pinMode(g_pins.swdio, INPUT_PULLUP);
+  // During SWD turnaround the host must release SWDIO.
+  // For this hardware debug session we intentionally enable a *pull-down* on the ESP32
+  // so that, together with the target's external ~10k pull-up, SWDIO will sit mid-rail
+  // if (and only if) the line is truly being released.
+  //
+  // NOTE: rename left as-is to keep call sites unchanged.
+  pinMode(g_pins.swdio, INPUT_PULLDOWN);
 }
 
 static inline void swdio_write(uint8_t bit) {
@@ -127,13 +132,26 @@ static bool dp_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out) {
   // Request phase (host drives)
   swdio_output();
   swdio_write(1); // ensure high between transfers
+
+#ifndef SWD_REQ_IDLE_LOW_BITS
+  // Empirical quirk (seen with ST-LINK/V2 waveforms): insert idle-low bits
+  // immediately before the request start bit.
+  // Tunable so we can match real targets/probes.
+#define SWD_REQ_IDLE_LOW_BITS 2
+#endif
+
+  for (int i = 0; i < (int)SWD_REQ_IDLE_LOW_BITS; i++) {
+    write_bit(0);
+  }
+
   for (int i = 0; i < 8; i++) {
     write_bit((req >> i) & 1);
   }
 
-  // Turnaround 1 cycle: host releases, target drives
+  // Turnaround: host releases SWDIO while SWCLK is low (end of last request bit).
+  // The first ACK bit is sampled on the very next rising edge, so don't insert an
+  // extra full clock here (it would delay sampling by one bit).
   swdio_input_pullup();
-  pulse_clock();
 
   // ACK (3 bits, LSB-first)
   uint8_t ack = 0;
@@ -189,18 +207,44 @@ void begin(const Pins &pins) {
 }
 
 void reset_and_switch_to_swd() {
-  // Hardware reset helps if target firmware disabled debug pins.
+  // Hold target in reset during SWD attach. This matches ST-LINK/V2 behavior observed
+  // on the bench (NRST held low across the early SWD connect + initial transactions).
   digitalWrite(g_pins.nrst, LOW);
   delay(20);
-  digitalWrite(g_pins.nrst, HIGH);
-  delay(20);
 
-  line_reset();
+  // Alternate init preamble (per observed ST-LINK/V2 behavior and additional docs):
+  // 1) Hold SWCLK high (~200us) while driving SWDIO low
+  // 2) Release SWDIO and send ~16 clock pulses (SWDIO floating)
+  // 3) Drive SWDIO high and send 30 clock cycles
+  // 4) Send JTAG-to-SWD selection sequence (0xE79E, LSB-first)
+  // 5) Send 50+ clock cycles with SWDIO held high again
+  swclk_high();
+  swdio_output();
+  swdio_write(0);
+  delayMicroseconds(200);
+
+  // Release SWDIO (tristate) and clock.
+  swdio_input_pullup();
+  for (int i = 0; i < 16; i++) {
+    pulse_clock();
+  }
+
+  // Drive SWDIO high and provide idle clocks.
+  swdio_output();
+  swdio_write(1);
+  for (int i = 0; i < 30; i++) {
+    pulse_clock();
+  }
+
   jtag_to_swd_sequence();
-  line_reset();
 
-  // At least a few idle cycles before first request.
+  // 50+ cycles with SWDIO high.
+  line_idle_cycles(80);
+
+  // A few extra idle cycles before first request.
   line_idle_cycles(16);
+
+  // Intentionally do NOT release NRST here; keep it low through the IDCODE read.
 }
 
 bool read_idcode(uint32_t *idcode_out, uint8_t *ack_out) {
