@@ -58,7 +58,8 @@ private:
   bool swd_enabled_ = false;
 
   // Response
-  uint32_t idcode_ = 0x2BA01477; // placeholder; can be overridden
+  // STM32G0 DP IDCODE observed on real hardware (STM32G031): 0x0BC11477
+  uint32_t idcode_ = 0x0BC11477;
   uint8_t bit_idx_ = 0;
   uint32_t data_shift_ = 0;
   uint8_t parity_bit_ = 0;

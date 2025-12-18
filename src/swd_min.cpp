@@ -212,34 +212,11 @@ void reset_and_switch_to_swd() {
   digitalWrite(g_pins.nrst, LOW);
   delay(20);
 
-  // Alternate init preamble (per observed ST-LINK/V2 behavior and additional docs):
-  // 1) Hold SWCLK high (~200us) while driving SWDIO low
-  // 2) Release SWDIO and send ~16 clock pulses (SWDIO floating)
-  // 3) Drive SWDIO high and send 30 clock cycles
-  // 4) Send JTAG-to-SWD selection sequence (0xE79E, LSB-first)
-  // 5) Send 50+ clock cycles with SWDIO held high again
-  swclk_high();
-  swdio_output();
-  swdio_write(0);
-  delayMicroseconds(200);
-
-  // Release SWDIO (tristate) and clock.
-  swdio_input_pullup();
-  for (int i = 0; i < 16; i++) {
-    pulse_clock();
-  }
-
-  // Drive SWDIO high and provide idle clocks.
-  swdio_output();
-  swdio_write(1);
-  for (int i = 0; i < 30; i++) {
-    pulse_clock();
-  }
-
+  // "Standard" SWD init: line reset -> JTAG-to-SWD -> line reset.
+  // (While keeping NRST asserted.)
+  line_reset();
   jtag_to_swd_sequence();
-
-  // 50+ cycles with SWDIO high.
-  line_idle_cycles(80);
+  line_reset();
 
   // A few extra idle cycles before first request.
   line_idle_cycles(16);

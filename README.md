@@ -19,7 +19,7 @@ Connect the ESP32-S3 to the STM32G031 as follows:
 | **3V3**      | **VDD**       | Power (if ESP powers STM32)   |
 | **GPIO 35**  | **SWCLK**     | Serial Wire Clock             |
 | **GPIO 36**  | **SWDIO**     | Serial Wire Data Input/Output |
-| **GPIO 37**  | **NRST**      | Reset Pin                     |
+| **GPIO 37**  | **NRST**      | Reset Pin (held LOW during attach + IDCODE read) |
 
 *Note: Pin assignments can be changed in `src/swd.h`.*
 
@@ -58,6 +58,10 @@ The project is built using **PlatformIO** with the **Arduino** framework.
 The long-term goal remains **full chip programming over SWD** (mass erase + program + verify).
 
 At the moment, we intentionally narrowed scope to first prove the physical/protocol layer by implementing an **as-simple-as-possible SWD bit-bang to read DP `IDCODE`**.
+
+Confirmed on real STM32G031 hardware:
+- DP IDCODE: `0x0BC11477`
+- Critical detail: the target responded reliably only when **NRST is held LOW** during the initial SWD attach and IDCODE read.
 
 What’s in the repo now:
 
