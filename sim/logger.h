@@ -16,7 +16,8 @@ public:
   void log_voltage_change(uint64_t t_ns, const std::string &signal, double voltage);
 
   // Logs a single point event (no de-dupe). Use this for sampling markers.
-  void log_event(uint64_t t_ns, const std::string &signal, double value);
+  // `voltage` is plotted on the y-axis; `value` is optional metadata for text labels.
+  void log_event(uint64_t t_ns, const std::string &signal, double voltage, double value);
 
 private:
   std::ofstream out_;

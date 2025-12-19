@@ -24,6 +24,34 @@ public:
   // Consumed by the simulator shim for waveform overlay; cleared when read.
   bool consume_sampled_host_bit_flag();
 
+  // When the target is currently accumulating bits into an internal shift register,
+  // this returns the number of bits collected so far (1..N). Otherwise returns 0.
+  // Intended for visualization overlays.
+  uint8_t shift_bit_count() const;
+
+  // Like shift_bit_count(), but returns a field-local index that aligns with SWD diagrams.
+  // Examples:
+  // - request bits: 1..8
+  // - ACK bits: 1..3
+  // - read data bits: 1..32
+  // - read parity: 33
+  // - write data bits (target sampling host data): 1..32
+  // - write parity: 33
+  uint8_t field_bit_index() const;
+
+  // When the target samples a host-driven bit, this returns the last sampled bit index
+  // (field-local, 1..33). When not applicable, returns 0.
+  uint8_t last_target_sample_bit_index() const { return last_target_sample_bit_index_; }
+
+  // When the host samples a target-driven bit (ACK/data/parity), this returns the bit index
+  // of the currently-driven bit (field-local, 1..33). When not applicable, returns 0.
+  uint8_t last_host_sample_bit_index() const { return last_host_sample_bit_index_; }
+
+  // Visualization helpers: expose current target state machine phase.
+  // This is simulator-only and must not be used by firmware logic.
+  uint8_t phase_id() const;
+  const char *phase_name() const;
+
   // Target drive control for SWDIO.
   bool drive_enabled() const { return drive_en_; }
   uint8_t drive_level() const { return drive_level_; }
@@ -117,6 +145,10 @@ private:
   uint8_t drive_level_ = 1;
 
   bool sampled_host_bit_ = false;
+
+  // Visualization-only: last sampled/last driven bit indices.
+  uint8_t last_target_sample_bit_index_ = 0;
+  uint8_t last_host_sample_bit_index_ = 0;
 
   // Host uses reset-and-switch sequence: line reset -> 0xE79E -> line reset.
   // Once we observe a valid 0xE79E, we expect one additional line reset (the one

@@ -284,6 +284,9 @@ void Stm32SwdTarget::reset() {
   drive_level_ = 1;
   sampled_host_bit_ = false;
 
+  last_target_sample_bit_index_ = 0;
+  last_host_sample_bit_index_ = 0;
+
   // Reset DP/AP state.
   dp_ctrlstat_ = 0;
   dp_select_ = 0;
@@ -300,8 +303,113 @@ bool Stm32SwdTarget::consume_sampled_host_bit_flag() {
   return v;
 }
 
+uint8_t Stm32SwdTarget::shift_bit_count() const {
+  // Expose whichever internal accumulator is currently active.
+  // This is intentionally approximate / visualization-oriented.
+  switch (phase_) {
+    case Phase::CollectSeq:
+      return seq_bits_;
+    case Phase::CollectRequest:
+      return req_bits_;
+    case Phase::RecvData_Write:
+      return write_bit_idx_;
+    case Phase::RecvParity_Write:
+      return 32;
+    default:
+      return 0;
+  }
+}
+
+uint8_t Stm32SwdTarget::field_bit_index() const {
+  // Return a field-local 1-based index intended to match SWD diagrams.
+  switch (phase_) {
+    case Phase::CollectSeq:
+      // JTAG-to-SWD is not part of an SWD transaction; still useful to show 1..16.
+      return (seq_bits_ == 0) ? 0 : seq_bits_;
+
+    case Phase::CollectRequest:
+      return (req_bits_ == 0) ? 0 : req_bits_;
+
+    case Phase::TurnaroundToTarget_Read:
+      // At this edge we present ACK bit0, but the host isn't sampling host-driven bits.
+      return 0;
+
+    case Phase::SendAck_Read:
+    case Phase::SendAck_Write: {
+      // bit_idx_ is the ACK bit being presented (1..2 while in SendAck_*)
+      // ACK bit0 is presented in the preceding TurnaroundToTarget_* phase.
+      // For visualization, we still want 1..3.
+      if (bit_idx_ == 0) return 1;
+      if (bit_idx_ == 1) return 2;
+      if (bit_idx_ == 2) return 3;
+      return 0;
+    }
+
+    case Phase::SendData_Read:
+      // bit_idx_ counts 0..31 while presenting data bits.
+      return (uint8_t)(bit_idx_ == 0 ? 1 : (bit_idx_));
+
+    case Phase::SendParity_Read:
+      return 33;
+
+    case Phase::RecvData_Write:
+      // write_bit_idx_ counts 0..31 of host-driven data bits.
+      return (uint8_t)(write_bit_idx_ == 0 ? 1 : (write_bit_idx_));
+
+    case Phase::RecvParity_Write:
+      return 33;
+
+    default:
+      return 0;
+  }
+}
+
+uint8_t Stm32SwdTarget::phase_id() const {
+  return static_cast<uint8_t>(phase_);
+}
+
+const char *Stm32SwdTarget::phase_name() const {
+  switch (phase_) {
+    case Phase::AwaitResetOrSeq:
+      return "AwaitResetOrSeq";
+    case Phase::CollectSeq:
+      return "CollectSeq";
+    case Phase::CollectRequest:
+      return "CollectRequest";
+    case Phase::TurnaroundToTarget_Read:
+      return "TurnaroundToTarget_Read";
+    case Phase::SendAck_Read:
+      return "SendAck_Read";
+    case Phase::SendData_Read:
+      return "SendData_Read";
+    case Phase::SendParity_Read:
+      return "SendParity_Read";
+    case Phase::TurnaroundToHost_Read:
+      return "TurnaroundToHost_Read";
+    case Phase::TurnaroundToTarget_Write:
+      return "TurnaroundToTarget_Write";
+    case Phase::SendAck_Write:
+      return "SendAck_Write";
+    case Phase::TurnaroundToHost_Write:
+      return "TurnaroundToHost_Write";
+    case Phase::RecvData_Write:
+      return "RecvData_Write";
+    case Phase::RecvParity_Write:
+      return "RecvParity_Write";
+    case Phase::Complete_Write:
+      return "Complete_Write";
+    default:
+      return "(unknown)";
+  }
+}
+
 void Stm32SwdTarget::on_swclk_rising_edge(bool host_driving, uint8_t host_level) {
   sampled_host_bit_ = false;
+  // Default to "not sampling" for this edge; set below when applicable.
+  last_target_sample_bit_index_ = 0;
+  // Host samples target-driven bits on SWCLK falling edge; however, for visualization we
+  // can still expose which target-driven bit is being *presented* on this rising edge.
+  last_host_sample_bit_index_ = 0;
 
   // Detect line reset: consecutive cycles where host drives SWDIO high.
   if (host_driving && host_level == 1) {
@@ -361,6 +469,8 @@ void Stm32SwdTarget::on_swclk_rising_edge(bool host_driving, uint8_t host_level)
     case Phase::CollectSeq: {
       if (!host_driving) return;
       sampled_host_bit_ = true;
+      // JTAG-to-SWD sequence bits are 1..16
+      last_target_sample_bit_index_ = (uint8_t)(seq_bits_ + 1);
       seq_shift_ |= (uint16_t)(host_level & 1u) << seq_bits_;
       seq_bits_++;
       if (seq_bits_ >= 16) {
@@ -395,6 +505,7 @@ void Stm32SwdTarget::on_swclk_rising_edge(bool host_driving, uint8_t host_level)
       if (req_bits_ == 0 && host_level == 0) return;
 
       sampled_host_bit_ = true;
+      last_target_sample_bit_index_ = (uint8_t)(req_bits_ + 1);
       req_shift_ |= (uint8_t)(host_level & 1u) << req_bits_;
       req_bits_++;
 
@@ -460,6 +571,7 @@ void Stm32SwdTarget::on_swclk_rising_edge(bool host_driving, uint8_t host_level)
       const uint8_t ack_ok = 0b001;
       drive_en_ = true;
       drive_level_ = (ack_ok >> 0) & 1u;
+      last_host_sample_bit_index_ = 1;
       phase_ = Phase::SendAck_Read;
       bit_idx_ = 1;
       return;
@@ -468,6 +580,7 @@ void Stm32SwdTarget::on_swclk_rising_edge(bool host_driving, uint8_t host_level)
     case Phase::SendAck_Read: {
       const uint8_t ack_ok = 0b001;
       drive_level_ = (ack_ok >> bit_idx_) & 1u;
+      last_host_sample_bit_index_ = (uint8_t)(bit_idx_ + 1);
       bit_idx_++;
       if (bit_idx_ >= 3) {
         phase_ = Phase::SendData_Read;
@@ -478,6 +591,7 @@ void Stm32SwdTarget::on_swclk_rising_edge(bool host_driving, uint8_t host_level)
 
     case Phase::SendData_Read: {
       drive_level_ = get_bit_u32(read_data_, bit_idx_);
+      last_host_sample_bit_index_ = (uint8_t)(bit_idx_ + 1);
       bit_idx_++;
       if (bit_idx_ >= 32) {
         phase_ = Phase::SendParity_Read;
@@ -487,6 +601,7 @@ void Stm32SwdTarget::on_swclk_rising_edge(bool host_driving, uint8_t host_level)
 
     case Phase::SendParity_Read:
       drive_level_ = read_parity_;
+      last_host_sample_bit_index_ = 33;
       phase_ = Phase::TurnaroundToHost_Read;
       return;
 
@@ -501,6 +616,7 @@ void Stm32SwdTarget::on_swclk_rising_edge(bool host_driving, uint8_t host_level)
       const uint8_t ack_ok = 0b001;
       drive_en_ = true;
       drive_level_ = (ack_ok >> 0) & 1u;
+      last_host_sample_bit_index_ = 1;
       phase_ = Phase::SendAck_Write;
       bit_idx_ = 1;
       return;
@@ -509,6 +625,7 @@ void Stm32SwdTarget::on_swclk_rising_edge(bool host_driving, uint8_t host_level)
     case Phase::SendAck_Write: {
       const uint8_t ack_ok = 0b001;
       drive_level_ = (ack_ok >> bit_idx_) & 1u;
+      last_host_sample_bit_index_ = (uint8_t)(bit_idx_ + 1);
       bit_idx_++;
       if (bit_idx_ >= 3) {
         // After the last ACK bit is *presented* on this rising edge, we must keep driving
@@ -529,6 +646,7 @@ void Stm32SwdTarget::on_swclk_rising_edge(bool host_driving, uint8_t host_level)
     case Phase::RecvData_Write: {
       if (!host_driving) return;
       sampled_host_bit_ = true;
+      last_target_sample_bit_index_ = (uint8_t)(write_bit_idx_ + 1);
       write_data_ |= ((uint32_t)(host_level & 1u) << write_bit_idx_);
       write_bit_idx_++;
       if (write_bit_idx_ >= 32) {
@@ -540,6 +658,7 @@ void Stm32SwdTarget::on_swclk_rising_edge(bool host_driving, uint8_t host_level)
     case Phase::RecvParity_Write: {
       if (!host_driving) return;
       sampled_host_bit_ = true;
+      last_target_sample_bit_index_ = 33;
       write_parity_rx_ = (host_level & 1u);
       phase_ = Phase::Complete_Write;
       return;

@@ -3,6 +3,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <string>
 
@@ -25,6 +26,9 @@ struct Runtime {
   Stm32SwdTarget target;
 
   uint8_t last_swclk_level = 0;
+
+  // Visualization: log target state-machine transitions as STEP_* markers.
+  std::string last_target_phase_label;
 
   bool swdio_input_pullup_seen = false;
   bool target_drove_swdio_seen = false;
@@ -69,6 +73,22 @@ static void maybe_clock_edge_update() {
   // Log after SWCLK change
   log_all();
 
+  // Some phases are best aligned to SWCLK falling edges (end-of-bit boundary in host code).
+  // Example: after the host sends the write parity bit (bit 33), the target has already sampled
+  // it on the prior rising edge; we want to mark completion at the falling edge that ends that bit.
+  if (level == 0) {
+    const char *raw = r.target.phase_name();
+    if (std::strcmp(raw, "Complete_Write") == 0) {
+      const char *label = "Complete_Write";
+      if (r.last_target_phase_label != label) {
+        r.last_target_phase_label = label;
+        std::string name = std::string("STEP_PHASE_") + label;
+        r.logger->log_event(r.t_ns, name, 3.55, (double)r.target.phase_id());
+      }
+    }
+    return;
+  }
+
   if (level == 1) {
     // Rising edge: inform target
     const sim::PinState hs = r.gpio.host_state(r.swdio_pin);
@@ -78,12 +98,42 @@ static void maybe_clock_edge_update() {
     // Update target's notion of time (for flash busy timing).
     r.target.set_time_ns(r.t_ns);
 
+    // Visualization: log a phase label aligned to *what happens on this rising edge*.
+    // The internal target state machine uses some turnaround phases that don't correspond
+    // to a visible waveform state. Map those to the user-facing phase name so markers line up.
+    // Example: the target starts driving ACK bit0 during TurnaroundToTarget_Read, so we label
+    // that edge as SendAck_Read.
+    {
+      const char *raw = r.target.phase_name();
+      const uint8_t raw_id = r.target.phase_id();
+
+      const char *label = raw;
+      if (std::strcmp(raw, "TurnaroundToTarget_Read") == 0) label = "SendAck_Read";
+      if (std::strcmp(raw, "TurnaroundToTarget_Write") == 0) label = "SendAck_Write";
+
+      // These phases align better with host SWDIO ownership changes (host switches SWDIO direction
+      // on SWCLK falling edges). We emit their markers in pinMode() instead.
+      bool emit = true;
+      if (std::strcmp(label, "CollectRequest") == 0) emit = false;
+      if (std::strcmp(label, "RecvData_Write") == 0) emit = false;
+      if (std::strcmp(label, "RecvParity_Write") == 0) emit = false;
+      if (std::strcmp(label, "Complete_Write") == 0) emit = false;
+
+      if (emit && r.last_target_phase_label != label) {
+        r.last_target_phase_label = label;
+        std::string name = std::string("STEP_PHASE_") + label;
+        r.logger->log_event(r.t_ns, name, 3.55, (double)raw_id);
+      }
+    }
+
     // Update target based on what it sees.
     r.target.on_swclk_rising_edge(host_driving, swdio.level);
 
     // If the target sampled a host-driven bit at this edge, emit a marker event.
     if (r.target.consume_sampled_host_bit_flag()) {
-      r.logger->log_event(r.t_ns, "SWDIO_SAMPLE_T", 3.42);
+      // Encode field-local bit index (matches SWD diagrams: request 1..8, data 1..32, parity=33).
+      const uint8_t n = r.target.last_target_sample_bit_index();
+      r.logger->log_event(r.t_ns, "SWDIO_SAMPLE_T", 3.42, (double)n);
     }
 
     // Apply target driving decision into GPIO model.
@@ -120,7 +170,7 @@ void log_step(const char *name) {
   if (!name || !name[0]) return;
   // Use a constant y-value slightly above the visible SWDIO range.
   // The viewer will render these as point markers.
-  r.logger->log_event(r.t_ns, name, 3.55);
+  r.logger->log_event(r.t_ns, name, 3.55, 0.0);
 }
 
 void set_log_path(const char *path) {
@@ -139,6 +189,9 @@ void set_log_path(const char *path) {
 
 void pinMode(int pin, int mode) {
   auto &r = sim::rt();
+
+  // For phase-marker alignment, we need to know whether SWDIO ownership changed.
+  const sim::PinState prev = r.gpio.host_state(pin);
 
   sim::PinDir dir = sim::PinDir::Input;
   sim::Pull pull = sim::Pull::None;
@@ -170,6 +223,21 @@ void pinMode(int pin, int mode) {
   }
 
   r.gpio.host_pinMode(pin, dir, pull);
+
+  // Visualization: align phase markers that correspond to the host taking SWDIO ownership
+  // (happens on SWCLK ↓ in the host code).
+  if (pin == r.swdio_pin && prev.dir != sim::PinDir::Output && dir == sim::PinDir::Output) {
+    const char *raw = r.target.phase_name();
+    if (std::strcmp(raw, "CollectRequest") == 0 || std::strcmp(raw, "RecvData_Write") == 0 ||
+        std::strcmp(raw, "RecvParity_Write") == 0) {
+      const char *label = raw;
+      if (r.last_target_phase_label != label) {
+        r.last_target_phase_label = label;
+        std::string name = std::string("STEP_PHASE_") + label;
+        r.logger->log_event(r.t_ns, name, 3.55, (double)r.target.phase_id());
+      }
+    }
+  }
   sim::log_all();
 }
 
@@ -189,7 +257,11 @@ int digitalRead(int pin) {
   if (pin == r.swdio_pin) {
     const auto swdio = r.gpio.resolve_swdio(r.swdio_pin);
     // Host sampling marker at the exact time the host reads SWDIO.
-    r.logger->log_event(r.t_ns, "SWDIO_SAMPLE_H", 3.42);
+    // Encode which target-driven bit is being presented (ACK/data/parity, field-local index).
+    // The host samples on SWCLK falling edge; this marker is still placed at the digitalRead()
+    // timestamp for ease of correlating with host code.
+    const uint8_t n = r.target.last_host_sample_bit_index();
+    r.logger->log_event(r.t_ns, "SWDIO_SAMPLE_H", 3.42, (double)n);
     return swdio.level;
   }
 

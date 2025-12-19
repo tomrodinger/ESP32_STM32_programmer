@@ -22,6 +22,18 @@ Notes on sampling markers:
 - **Host sample time** is defined as the timestamp of the simulator’s implementation of [`digitalRead()`](sim/arduino_compat/arduino_compat.cpp:187) when reading the SWDIO pin. This corresponds to the exact sampling point in the host algorithm (see [`swd_min::read_bit()`](src/swd_min.cpp:72) -> [`swdio_read()`](src/swd_min.cpp:38)).
 - **Target sample time** is defined as the timestamp of the simulated target’s SWCLK rising-edge handler when it is consuming host-driven bits (see [`sim::Stm32SwdTarget::on_swclk_rising_edge()`](sim/stm32_swd_target.cpp:303)). This is simulator-only logic and does not need to match ESP32 constraints.
 
+Marker meanings in the Plotly viewer:
+
+- Blue/orange circles on SWDIO show sampling moments:
+  - Blue = host sampled a target-driven bit
+  - Orange = target sampled a host-driven bit
+- The number in the circle is the **bit index within the current SWD field** (matches SWD packet diagrams):
+  - request: 1..8
+  - ACK: 1..3
+  - data: 1..32
+  - parity: 33
+- Green triangle markers (`STEP_*`) include protocol **phase transitions** (e.g. `STEP_PHASE_SendAck_Read`) to make it easy to orient while panning/zooming.
+
 ## New standalone simulations (separate executables)
 
 These simulators are **separate from the full-flow** simulator (`swd_sim`). Each simulator:
@@ -118,7 +130,7 @@ python3 viewer/view_log.py read_simulation.csv
 python3 viewer/view_log.py write_simulation.csv
 ```
 
-Note: `viewer/view_log.py` always writes `waveforms.html`, so if you want to keep both read+write pages around at once, rename the output between runs. This needs to be made better in the future. The filename of the output html file needs to be autodetermined based on the input filename.
+Note: [`viewer/view_log.py`](viewer/view_log.py:1) writes an HTML file next to the CSV with the same basename, e.g. `read_simulation.csv` -> `read_simulation.html`.
 
 ## Voltage encoding (as required)
 

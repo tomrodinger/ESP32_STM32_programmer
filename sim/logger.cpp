@@ -5,7 +5,7 @@
 namespace sim {
 
 CsvLogger::CsvLogger(const std::string &path) : out_(path) {
-  out_ << "t_ns,signal,voltage\n";
+  out_ << "t_ns,signal,voltage,value\n";
   out_.setf(std::ios::fixed);
   out_ << std::setprecision(3);
 }
@@ -19,11 +19,12 @@ void CsvLogger::log_voltage_change(uint64_t t_ns, const std::string &signal, dou
     last_v_[signal] = voltage;
   }
 
-  out_ << t_ns << "," << signal << "," << voltage << "\n";
+  // Keep value blank for step-wise voltage changes.
+  out_ << t_ns << "," << signal << "," << voltage << "," << "\n";
 }
 
-void CsvLogger::log_event(uint64_t t_ns, const std::string &signal, double value) {
-  out_ << t_ns << "," << signal << "," << value << "\n";
+void CsvLogger::log_event(uint64_t t_ns, const std::string &signal, double voltage, double value) {
+  out_ << t_ns << "," << signal << "," << voltage << "," << value << "\n";
 }
 
 } // namespace sim
