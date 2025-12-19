@@ -21,7 +21,7 @@ Connect the ESP32-S3 to the STM32G031 as follows:
 | **GPIO 36**  | **SWDIO**     | Serial Wire Data Input/Output |
 | **GPIO 37**  | **NRST**      | Reset Pin (held LOW during attach + IDCODE read) |
 
-*Note: Pin assignments can be changed in `src/swd.h`.*
+*Note: Pin assignments can be changed in [`src/swd_min.h`](src/swd_min.h:1) (see [`swd_min::Pins`](src/swd_min.h:13)).*
 
 Available GPIOs on this board for SWD bit-banging: **35, 36, 37**.
 
@@ -55,24 +55,64 @@ The project is built using **PlatformIO** with the **Arduino** framework.
 
 ## Current status (as of this commit)
 
-The long-term goal remains **full chip programming over SWD** (mass erase + program + verify).
+This repo has two parallel deliverables:
 
-At the moment, we intentionally narrowed scope to first prove the physical/protocol layer by implementing an **as-simple-as-possible SWD bit-bang to read DP `IDCODE`**.
+1. **ESP32-S3 firmware** that can program an STM32G031 over SWD.
+2. A **macOS-hosted simulator + waveform viewer** that runs the *same bit-banged SWD host code* and visualizes the full programming sequence.
 
-Confirmed on real STM32G031 hardware:
-- DP IDCODE: `0x0BC11477`
-- Critical detail: the target responded reliably only when **NRST is held LOW** during the initial SWD attach and IDCODE read.
+### Project goal (end state)
 
-What’s in the repo now:
+End-to-end programming should follow this sequence (both on hardware and in the simulator):
 
-- Minimal IDCODE-only SWD implementation: [`src/swd_min.cpp`](src/swd_min.cpp:1), [`src/swd_min.h`](src/swd_min.h:1)
-- ESP32 serial test harness for IDCODE reads: [`src/main.cpp`](src/main.cpp:1)
-- macOS simulator that compiles the same SWD code via an Arduino shim and produces a voltage log: [`sim/`](sim/:1)
-- interactive waveform viewer (trackpad pan/zoom): [`viewer/view_log.py`](viewer/view_log.py:1)
+1. SWD attach + **DP `IDCODE` read** (prove physical/protocol layer)
+2. **DP init + power-up** (ADIv5 `CTRL/STAT` handshake) via [`swd_min::dp_init_and_power_up()`](src/swd_min.cpp:392)
+3. **Connect + halt** core via [`stm32g0_prog::connect_and_halt()`](src/stm32g0_prog.cpp:76)
+4. **Flash mass erase** via [`stm32g0_prog::flash_mass_erase()`](src/stm32g0_prog.cpp:105)
+5. **Flash program** (in the simulator: a small 8-byte payload) via [`stm32g0_prog::flash_program()`](src/stm32g0_prog.cpp:130)
+6. **Verify** by reading flash back and comparing via [`stm32g0_prog::flash_verify_and_dump()`](src/stm32g0_prog.cpp:186)
 
-Notes:
+### What’s in this repo
 
-- The older “full programmer” code paths described below may not reflect the currently compiled firmware in [`src/main.cpp`](src/main.cpp:1). They are still the target end state.
+- SWD host bit-bang + DP/AP + AHB memory access helpers: [`src/swd_min.cpp`](src/swd_min.cpp:1), [`src/swd_min.h`](src/swd_min.h:1)
+- STM32G0 flash algorithms (unlock, mass erase, 64-bit programming, verify): [`src/stm32g0_prog.cpp`](src/stm32g0_prog.cpp:1), [`src/stm32g0_prog.h`](src/stm32g0_prog.h:1)
+- ESP32 serial command harness (commands: `i/e/w/v/a`): [`src/main.cpp`](src/main.cpp:1)
+- Simulator executable that runs the full flow and writes `signals.csv`: [`sim/main.cpp`](sim/main.cpp:1)
+- Waveform viewer (Plotly HTML): [`viewer/view_log.py`](viewer/view_log.py:1)
+
+### Hardware note (observed)
+
+On real STM32G031 hardware, the target responded reliably only when **NRST is held LOW** during the initial SWD attach and IDCODE read (see [`swd_min::reset_and_switch_to_swd()`](src/swd_min.cpp:361)).
+
+### SWDIO vs SWCLK edges (edge-only model for the simulator)
+
+For the standalone signal simulator we simplify the SWD physical layer into **edge-triggered events only**:
+
+| SWCLK edge | Host (probe) | Target (SWD-DP) |
+|---|---|---|
+| **Rising (↑)** | (no action; must be stable here) | **Sample SWDIO** (when host is driving) **and update SWDIO drive state** (when target is driving) |
+| **Falling (↓)** | **Sample SWDIO** (when target is driving) **and update SWDIO drive state** (when host is driving) | (no action; must be stable here) |
+
+This matches the practical interpretation that the **target is “rising-edge” (sample + change on ↑)**, therefore the **host must be “falling-edge” (change + sample on ↓)** to avoid races on a single bidirectional wire.
+
+#### Turnaround expressed in edges (why it’s “½ bit” and “1½ bit”)
+
+Because **the target can only start/stop driving on ↑** and **the host can only start/stop driving on ↓**, the “turnaround cycle” from the Arm packet diagrams becomes asymmetric in edge time:
+
+- **Host → Target turnaround (request → ACK)**: **½-cycle of Z**
+  - Host releases SWDIO on **↓** after the last request bit.
+  - Target begins driving on the very next **↑** (ACK bit0 becomes valid for the following ↓ sample).
+
+- **Target → Host turnaround (end of read / after ACK in write)**: **1½-cycles of Z**
+  - Target releases SWDIO on **↑** after its last driven bit and the line floats.
+  - Host does not take ownership until 1½ cycles of the clock later and then starts driving the line on a **↓**, so SWDIO stays `Z` across the next **↓** and **↑**.
+  - Host begins driving on the following **↓**.
+
+In this edge-only model, the only legal SWDIO transitions are:
+
+- host drive changes on **↓**
+- target drive changes on **↑**
+- host samples on **↓**
+- target samples on **↑**
 
 ## Usage
 

@@ -27,6 +27,25 @@ int  digitalRead(int pin);
 void delay(unsigned long ms);
 void delayMicroseconds(unsigned int us);
 
+unsigned long millis();
+
+// Minimal Serial shim used by the firmware code.
+class SerialShim {
+public:
+  void begin(unsigned long) {}
+  explicit operator bool() const { return true; }
+
+  void println() const;
+  void println(const char *s) const;
+  void print(const char *s) const;
+  void print(char c) const;
+
+  // Arduino's Serial.printf returns size_t; we'll just return int.
+  int printf(const char *fmt, ...) const __attribute__((format(printf, 2, 3)));
+};
+
+extern SerialShim Serial;
+
 // A few Arduino-ish types
 using uint8_t  = std::uint8_t;
 using uint16_t = std::uint16_t;

@@ -11,6 +11,7 @@ add_executable(swd_sim
   logger.cpp
   stm32_swd_target.cpp
   ../src/swd_min.cpp
+  ../src/stm32g0_prog.cpp
 )
 
 target_include_directories(swd_sim PRIVATE
@@ -23,4 +24,64 @@ target_include_directories(swd_sim PRIVATE
 # Keep warnings reasonable for quick iteration
 if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang|GNU")
   target_compile_options(swd_sim PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_executable(reset_and_switch_to_swd_simulation
+  reset_and_switch_to_swd_main.cpp
+  arduino_compat/arduino_compat.cpp
+  gpio_model.cpp
+  logger.cpp
+  stm32_swd_target.cpp
+  ../src/swd_min.cpp
+)
+
+target_include_directories(reset_and_switch_to_swd_simulation PRIVATE
+  ${CMAKE_CURRENT_LIST_DIR}/arduino_compat
+  ${CMAKE_CURRENT_LIST_DIR}
+  ${CMAKE_CURRENT_LIST_DIR}/..
+  ${CMAKE_CURRENT_LIST_DIR}/../src
+)
+
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang|GNU")
+  target_compile_options(reset_and_switch_to_swd_simulation PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_executable(read_simulation
+  read_simulation_main.cpp
+  arduino_compat/arduino_compat.cpp
+  gpio_model.cpp
+  logger.cpp
+  stm32_swd_target.cpp
+  ../src/swd_min.cpp
+)
+
+target_include_directories(read_simulation PRIVATE
+  ${CMAKE_CURRENT_LIST_DIR}/arduino_compat
+  ${CMAKE_CURRENT_LIST_DIR}
+  ${CMAKE_CURRENT_LIST_DIR}/..
+  ${CMAKE_CURRENT_LIST_DIR}/../src
+)
+
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang|GNU")
+  target_compile_options(read_simulation PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_executable(write_simulation
+  write_simulation_main.cpp
+  arduino_compat/arduino_compat.cpp
+  gpio_model.cpp
+  logger.cpp
+  stm32_swd_target.cpp
+  ../src/swd_min.cpp
+)
+
+target_include_directories(write_simulation PRIVATE
+  ${CMAKE_CURRENT_LIST_DIR}/arduino_compat
+  ${CMAKE_CURRENT_LIST_DIR}
+  ${CMAKE_CURRENT_LIST_DIR}/..
+  ${CMAKE_CURRENT_LIST_DIR}/../src
+)
+
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang|GNU")
+  target_compile_options(write_simulation PRIVATE -Wall -Wextra -Wpedantic)
 endif()

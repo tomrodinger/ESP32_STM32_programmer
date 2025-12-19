@@ -160,6 +160,10 @@ def main():
     signals = sorted({sig for _, sig, _ in events})
     want = [s for s in ["NRST", "SWCLK", "SWDIO"] if s in signals]
 
+    # Simulator step markers (logged as point-events with a constant voltage value).
+    # We plot them on the SWDIO subplot so they are easy to find while panning.
+    step_sigs = sorted([s for s in signals if s.startswith("STEP_")])
+
     fig = make_subplots(
         rows=len(want),
         cols=1,
@@ -235,6 +239,39 @@ def main():
                             line=dict(color="#ff7f0e", width=1),
                         ),
                         hovertemplate="t=%{x} ns<br>Target sample<extra></extra>",
+                    ),
+                    row=i,
+                    col=1,
+                )
+
+            # Overlay high-level step markers (STEP_*).
+            if step_sigs:
+                # Flatten into a single trace.
+                sx = []
+                sy = []
+                st = []
+                for t, sig2, v in events:
+                    if sig2 in step_sigs:
+                        sx.append(t)
+                        sy.append(v)
+                        st.append(sig2.replace("STEP_", ""))
+
+                fig.add_trace(
+                    go.Scatter(
+                        x=sx,
+                        y=sy,
+                        mode="markers+text",
+                        name="Steps",
+                        text=st,
+                        textposition="top center",
+                        textfont=dict(size=10, color="#111"),
+                        marker=dict(
+                            symbol="triangle-up",
+                            size=10,
+                            color="#2ca02c",
+                            line=dict(color="#2ca02c", width=1),
+                        ),
+                        hovertemplate="t=%{x} ns<br>%{text}<extra></extra>",
                     ),
                     row=i,
                     col=1,

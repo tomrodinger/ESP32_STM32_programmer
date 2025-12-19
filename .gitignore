@@ -45,3 +45,5 @@ src_failed_attempt_2/
 *.swp
 *.swo
 *~
+
+.roo/
