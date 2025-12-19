@@ -501,8 +501,16 @@ void Stm32SwdTarget::on_swclk_rising_edge(bool host_driving, uint8_t host_level)
         req_bits_ = 0;
       }
 
-      // allow idle-low bits before start
-      if (req_bits_ == 0 && host_level == 0) return;
+      // Allow any number of idle-low bits before the start bit.
+      // IMPORTANT: these are not part of the request field.
+      // However, we still emit a sampling marker for visualization, with bit index = 0
+      // so the viewer can show that the target sampled SWDIO, but numbering does not
+      // increase until the request start bit (first '1').
+      if (req_bits_ == 0 && host_level == 0) {
+        sampled_host_bit_ = true;
+        last_target_sample_bit_index_ = 0;
+        return;
+      }
 
       sampled_host_bit_ = true;
       last_target_sample_bit_index_ = (uint8_t)(req_bits_ + 1);

@@ -94,6 +94,7 @@ static inline uint8_t parity_u32(uint32_t v) {
 
 // Forward decls (needed because some inline helpers call these)
 static inline void line_idle_cycles(uint32_t cycles);
+static inline void line_idle_cycles_low(uint32_t cycles);
 
 static inline void swd_line_idle_cycles(uint32_t cycles) { line_idle_cycles(cycles); }
 
@@ -109,6 +110,23 @@ static inline void line_idle_cycles(uint32_t cycles) {
     pulse_clock();
   }
 }
+
+static inline void line_idle_cycles_low(uint32_t cycles) {
+  // Bus idle/flush (low): host drives SWDIO low.
+  // This is useful between transfers because it is unambiguous and cannot be
+  // confused with the SWD line-reset sequence (which is triggered by long runs of 1s).
+  swdio_output();
+  swdio_write(0);
+  for (uint32_t i = 0; i < cycles; i++) {
+    pulse_clock();
+  }
+}
+
+#ifndef SWD_POST_IDLE_LOW_CYCLES
+// After each completed transfer, clock a short idle/flush window with SWDIO held LOW.
+// This matches common probe waveforms and simplifies transaction boundaries.
+#define SWD_POST_IDLE_LOW_CYCLES 8
+#endif
 
 static inline void line_reset() {
   // >50 cycles with SWDIO high.
@@ -182,9 +200,7 @@ static bool dp_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out) {
     // target releases on , host takes ownership 1.5 cycles later on .
     pulse_clock();
     pulse_clock();
-    swdio_output();
-    swdio_write(1);
-    line_idle_cycles(8);
+    line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
     return false;
   }
 
@@ -201,16 +217,17 @@ static bool dp_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out) {
   pulse_clock();
   pulse_clock();
   swdio_output();
-  swdio_write(1);
+  // Drive low for the post-transfer idle/flush window.
+  swdio_write(0);
 
   // Parity check: SWD uses odd parity over the 32 data bits
   if (p_rx != parity_u32(v)) {
-    line_idle_cycles(8);
+    line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
     return false;
   }
 
   if (val_out) *val_out = v;
-  line_idle_cycles(8);
+  line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
   return true;
 }
 
@@ -244,9 +261,7 @@ static bool dp_write(uint8_t addr, uint32_t val, uint8_t *ack_out) {
   if (ack != ACK_OK) {
     pulse_clock();
     pulse_clock();
-    swdio_output();
-    swdio_write(1);
-    swd_line_idle_cycles(8);
+    line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
     return false;
   }
 
@@ -262,9 +277,8 @@ static bool dp_write(uint8_t addr, uint32_t val, uint8_t *ack_out) {
   }
   write_bit(parity_u32(val));
 
-  // Idle
-  swdio_write(1);
-  swd_line_idle_cycles(8);
+  // Post-transfer idle/flush (low)
+  line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
   return true;
 }
 
@@ -288,9 +302,7 @@ static bool ap_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out) {
   if (ack != ACK_OK) {
     pulse_clock();
     pulse_clock();
-    swdio_output();
-    swdio_write(1);
-    swd_line_idle_cycles(8);
+    line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
     return false;
   }
 
@@ -310,17 +322,17 @@ static bool ap_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out) {
   pulse_clock();
   pulse_clock();
   swdio_output();
-  swdio_write(1);
+  swdio_write(0);
 
   if (p_rx != parity_u32(v)) {
-    swd_line_idle_cycles(8);
+    line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
     return false;
   }
 
   // The value returned here is NOT the true AP register value (posted read semantics);
   // it is the stale read buffer. Caller should read DP RDBUFF.
   if (val_out) *val_out = v;
-  swd_line_idle_cycles(8);
+  line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
   return true;
 }
 
@@ -342,9 +354,7 @@ static bool ap_write(uint8_t addr, uint32_t val, uint8_t *ack_out) {
   if (ack != ACK_OK) {
     pulse_clock();
     pulse_clock();
-    swdio_output();
-    swdio_write(1);
-    swd_line_idle_cycles(8);
+    line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
     return false;
   }
 
@@ -356,8 +366,8 @@ static bool ap_write(uint8_t addr, uint32_t val, uint8_t *ack_out) {
   for (int i = 0; i < 32; i++) write_bit((val >> i) & 1u);
   write_bit(parity_u32(val));
 
-  swdio_write(1);
-  swd_line_idle_cycles(8);
+  // Post-transfer idle/flush (low)
+  line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
   return true;
 }
 

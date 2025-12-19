@@ -119,6 +119,7 @@ These simulators are **separate from the full-flow** simulator (`swd_sim`). Each
 
 - All init waveform features from `reset_and_switch_to_swd_simulation`.
 - A full read transaction (target drives ACK+data+parity) followed by the host returning SWDIO to idle.
+- Between the read and the write, the host clocks an **idle/flush window** with SWDIO held **LOW** (see [`SWD_POST_IDLE_LOW_CYCLES`](src/swd_min.cpp:127)), and then (optionally) a couple of additional idle-low bits before the next request (see [`SWD_REQ_IDLE_LOW_BITS`](src/swd_min.cpp:166)).
 - A subsequent write transaction where:
   - the host drives the request header,
   - releases for target ACK,
@@ -141,6 +142,7 @@ These simulators are **separate from the full-flow** simulator (`swd_sim`). Each
 
 - All init waveform features from `reset_and_switch_to_swd_simulation`.
 - A full write transaction (host drives header and data) followed by the host releasing SWDIO back to idle.
+- Between the write and the read, the host clocks an **idle/flush window** with SWDIO held **LOW** (see [`SWD_POST_IDLE_LOW_CYCLES`](src/swd_min.cpp:127)), and then (optionally) a couple of additional idle-low bits before the next request (see [`SWD_REQ_IDLE_LOW_BITS`](src/swd_min.cpp:166)).
 - A subsequent read transaction where:
   - host releases for target-driven ACK+data+parity,
   - and target releases back for host to drive idle.
