@@ -85,3 +85,43 @@ target_include_directories(write_simulation PRIVATE
 if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang|GNU")
   target_compile_options(write_simulation PRIVATE -Wall -Wextra -Wpedantic)
 endif()
+
+add_executable(read_then_write_simulation
+  read_then_write_simulation_main.cpp
+  arduino_compat/arduino_compat.cpp
+  gpio_model.cpp
+  logger.cpp
+  stm32_swd_target.cpp
+  ../src/swd_min.cpp
+)
+
+target_include_directories(read_then_write_simulation PRIVATE
+  ${CMAKE_CURRENT_LIST_DIR}/arduino_compat
+  ${CMAKE_CURRENT_LIST_DIR}
+  ${CMAKE_CURRENT_LIST_DIR}/..
+  ${CMAKE_CURRENT_LIST_DIR}/../src
+)
+
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang|GNU")
+  target_compile_options(read_then_write_simulation PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_executable(write_then_read_simulation
+  write_then_read_simulation_main.cpp
+  arduino_compat/arduino_compat.cpp
+  gpio_model.cpp
+  logger.cpp
+  stm32_swd_target.cpp
+  ../src/swd_min.cpp
+)
+
+target_include_directories(write_then_read_simulation PRIVATE
+  ${CMAKE_CURRENT_LIST_DIR}/arduino_compat
+  ${CMAKE_CURRENT_LIST_DIR}
+  ${CMAKE_CURRENT_LIST_DIR}/..
+  ${CMAKE_CURRENT_LIST_DIR}/../src
+)
+
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang|GNU")
+  target_compile_options(write_then_read_simulation PRIVATE -Wall -Wextra -Wpedantic)
+endif()

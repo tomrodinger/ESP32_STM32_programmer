@@ -105,6 +105,49 @@ These simulators are **separate from the full-flow** simulator (`swd_sim`). Each
 
 **Output**: `write_simulation.csv`.
 
+### 4) `read_then_write_simulation`
+
+**Purpose**: validate a **read -> write transition** without re-attaching (turnaround correctness when switching directions between transactions).
+
+**Sequence**:
+
+1. Run the full attach sequence via [`swd_min::reset_and_switch_to_swd()`](src/swd_min.cpp:382).
+2. Perform one DP read of IDCODE via [`swd_min::read_idcode()`](src/swd_min.cpp:400).
+3. Immediately perform one DP write of SELECT via [`swd_min::dp_write_reg()`](src/swd_min.cpp:409).
+
+**Expected waveform features**:
+
+- All init waveform features from `reset_and_switch_to_swd_simulation`.
+- A full read transaction (target drives ACK+data+parity) followed by the host returning SWDIO to idle.
+- A subsequent write transaction where:
+  - the host drives the request header,
+  - releases for target ACK,
+  - then re-takes SWDIO to drive data+parity.
+- No SWDIO contention (`1.65V`) at either transaction boundary.
+
+**Output**: `read_then_write_simulation.csv`.
+
+### 5) `write_then_read_simulation`
+
+**Purpose**: validate a **write -> read transition** without re-attaching (turnaround correctness when switching directions between transactions).
+
+**Sequence**:
+
+1. Run the full attach sequence via [`swd_min::reset_and_switch_to_swd()`](src/swd_min.cpp:382).
+2. Perform one DP write of SELECT via [`swd_min::dp_write_reg()`](src/swd_min.cpp:409).
+3. Immediately perform one DP read of IDCODE via [`swd_min::read_idcode()`](src/swd_min.cpp:400).
+
+**Expected waveform features**:
+
+- All init waveform features from `reset_and_switch_to_swd_simulation`.
+- A full write transaction (host drives header and data) followed by the host releasing SWDIO back to idle.
+- A subsequent read transaction where:
+  - host releases for target-driven ACK+data+parity,
+  - and target releases back for host to drive idle.
+- No SWDIO contention (`1.65V`) at either transaction boundary.
+
+**Output**: `write_then_read_simulation.csv`.
+
 ### Build + run the standalone sims (quick commands)
 
 Build everything (full-flow sim + standalone sims):
@@ -120,6 +163,8 @@ Run one of the standalone sims (writes CSV into the repo root):
 ./sim/build/reset_and_switch_to_swd_simulation
 ./sim/build/read_simulation
 ./sim/build/write_simulation
+./sim/build/read_then_write_simulation
+./sim/build/write_then_read_simulation
 ```
 
 View a CSV in the browser (generates `waveforms.html` and opens it):
@@ -128,6 +173,8 @@ View a CSV in the browser (generates `waveforms.html` and opens it):
 python3 viewer/view_log.py reset_and_switch_to_swd_simulation.csv
 python3 viewer/view_log.py read_simulation.csv
 python3 viewer/view_log.py write_simulation.csv
+python3 viewer/view_log.py read_then_write_simulation.csv
+python3 viewer/view_log.py write_then_read_simulation.csv
 ```
 
 Note: [`viewer/view_log.py`](viewer/view_log.py:1) writes an HTML file next to the CSV with the same basename, e.g. `read_simulation.csv` -> `read_simulation.html`.
