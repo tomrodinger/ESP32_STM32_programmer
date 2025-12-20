@@ -15,13 +15,15 @@ int main() {
   sim::log_step("STEP_WRITE_BEGIN");
   swd_min::reset_and_switch_to_swd();
 
-  // Single DP write: SELECT (0x08). Value doesn't matter much; choose something visible.
-  sim::log_step("STEP_WRITE_SELECT_REQ");
+  // Single DP write: ABORT (0x00). This matches the bench failure case:
+  //   SWD: DP WRITE req=0x81 addr=0x00 data=0x0000001E
+  // i.e. clear sticky bits ORUNERRCLR/WDERRCLR/STKERRCLR/STKCMPCLR.
+  sim::log_step("STEP_WRITE_ABORT_REQ");
   uint8_t ack = 0;
-  const uint32_t value = 0xA5A5A5A5u;
-  const bool ok = swd_min::dp_write_reg(swd_min::DP_ADDR_SELECT, value, &ack);
-  std::printf("DP_WRITE SELECT: ack=%u ok=%d value=0x%08X\n", ack, ok ? 1 : 0, value);
-  sim::log_step(ok ? "STEP_WRITE_SELECT_OK" : "STEP_WRITE_SELECT_FAIL");
+  const uint32_t value = 0x0000001Eu;
+  const bool ok = swd_min::dp_write_reg(swd_min::DP_ADDR_ABORT, value, &ack);
+  std::printf("DP_WRITE ABORT: ack=%u ok=%d value=0x%08X\n", ack, ok ? 1 : 0, value);
+  sim::log_step(ok ? "STEP_WRITE_ABORT_OK" : "STEP_WRITE_ABORT_FAIL");
 
   std::printf(
       "DEBUG flags: swdio_input_pullup_seen=%d target_drove_swdio_seen=%d target_voltage_logged_seen=%d contention_seen=%d\n",
@@ -40,4 +42,3 @@ int main() {
   std::printf("Wrote log: write_simulation.csv\n");
   return ok ? 0 : 2;
 }
-

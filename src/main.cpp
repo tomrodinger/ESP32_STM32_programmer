@@ -10,6 +10,10 @@ static void print_help() {
   Serial.println("Commands:");
   Serial.println("  h = help");
   Serial.println("  i = reset + read DP IDCODE");
+  Serial.println("  t = SWD smoke test (DP power-up handshake + AHB-AP IDR)");
+  Serial.println("  d = toggle SWD verbose diagnostics");
+  Serial.println("  b = DP ABORT write test (write under NRST low, then under NRST high)");
+  Serial.println("  c = DP CTRL/STAT single-write test (DP[0x04]=0x50000000)");
   Serial.println("  r = read first 8 bytes of target flash @ 0x08000000");
   Serial.println("  e = erase entire flash (mass erase)");
   Serial.println("  w = write firmware to flash");
@@ -21,9 +25,8 @@ static bool print_idcode_attempt() {
   uint8_t ack = 0;
   uint32_t idcode = 0;
 
-  swd_min::reset_and_switch_to_swd();
-
-  const bool ok = swd_min::read_idcode(&idcode, &ack);
+  // If verbose is enabled, the attach helper prints the attach banner lines.
+  const bool ok = swd_min::attach_and_read_idcode(&idcode, &ack);
 
   Serial.printf("SWD ACK: %u (%s)\n", ack, swd_min::ack_to_str(ack));
   if (ok) {
@@ -85,6 +88,82 @@ static bool cmd_read_flash_first_8() {
   return true;
 }
 
+static bool cmd_swd_smoke_test() {
+  Serial.println("SWD smoke test...");
+  // Assumes SWD already attached via 'i' or the boot-time auto attempt.
+  uint8_t ack = 0;
+
+  // 2) DP power-up handshake
+  Serial.println("DP init + power-up...");
+  const bool dp_ok = swd_min::dp_init_and_power_up();
+  Serial.println(dp_ok ? "DP init OK" : "DP init FAIL");
+  if (!dp_ok) return false;
+
+  // 3) Release reset then read AHB-AP IDR (tests DP.SELECT + AP read semantics)
+  swd_min::set_nrst(false);
+  delay(5);
+
+  Serial.println("Reading AHB-AP IDR (AP register 0xFC)...");
+  uint32_t ap_idr = 0;
+  const bool ap_ok = swd_min::ap_read_reg(swd_min::AP_ADDR_IDR, &ap_idr, &ack);
+  Serial.printf("AP IDR: ok=%d ack=%u (%s) idr=0x%08lX\n", ap_ok ? 1 : 0, (unsigned)ack, swd_min::ack_to_str(ack),
+                (unsigned long)ap_idr);
+  return ap_ok;
+}
+
+static bool cmd_toggle_verbose() {
+  const bool enabled = !swd_min::verbose_enabled();
+  swd_min::set_verbose(enabled);
+  Serial.printf("SWD verbose: %s\n", enabled ? "ON" : "OFF");
+  return true;
+}
+
+static bool cmd_dp_abort_write_test() {
+  // The bench failure shows ACK=7 (invalid) for the first DP write (ABORT clear).
+  // This test runs the exact same DP write twice:
+  //   1) while NRST is still asserted low (as left by reset_and_switch_to_swd)
+  //   2) after releasing NRST high
+  // so you can compare scope waveforms and see if NRST state is the deciding factor.
+  const uint32_t abort_clear = (1u << 4) | (1u << 3) | (1u << 2) | (1u << 1); // 0x1E
+
+  Serial.println("DP ABORT write test (no reset)...");
+  Serial.println("Phase 1: DP WRITE ABORT=0x0000001E");
+  {
+    uint8_t ack = 0;
+    const bool ok = swd_min::dp_write_reg(swd_min::DP_ADDR_ABORT, abort_clear, &ack);
+    Serial.printf("ABORT write: ok=%d ack=%u (%s)\n", ok ? 1 : 0, (unsigned)ack, swd_min::ack_to_str(ack));
+  }
+
+  Serial.println("Phase 2: release NRST HIGH, delay 5ms, then DP WRITE ABORT=0x0000001E");
+  swd_min::set_nrst(false);
+  delay(5);
+  {
+    uint8_t ack = 0;
+    const bool ok = swd_min::dp_write_reg(swd_min::DP_ADDR_ABORT, abort_clear, &ack);
+    Serial.printf("ABORT write (NRST HIGH): ok=%d ack=%u (%s)\n", ok ? 1 : 0, (unsigned)ack, swd_min::ack_to_str(ack));
+  }
+
+  return true;
+}
+
+static bool cmd_ap_csw_write_readback_test() {
+  // Goal: a *single* DP write immediately after attach:
+  // DP CTRL/STAT (addr 0x04) = 0x50000000
+  // This matches the ADIv5 power-up request pattern used by our bring-up code.
+  static constexpr uint32_t CTRLSTAT_PWRUP_REQ = 0x50000000u; // (1<<30)|(1<<28)
+
+  // Assumes SWD already attached via 'i' or the boot-time auto attempt.
+  // (Bench observation: a prior IDCODE read makes the following DP write ACK reliably.)
+  Serial.println("DP CTRL/STAT single-write test (no reset, no IDCODE read)...");
+
+  uint8_t ack = 0;
+  Serial.printf("Writing DP CTRL/STAT (DP 0x%02X) = 0x%08lX...\n", (unsigned)swd_min::DP_ADDR_CTRLSTAT,
+                (unsigned long)CTRLSTAT_PWRUP_REQ);
+  const bool ok = swd_min::dp_write_reg(swd_min::DP_ADDR_CTRLSTAT, CTRLSTAT_PWRUP_REQ, &ack);
+  Serial.printf("DP WRITE CTRL/STAT: ok=%d ack=%u (%s)\n", ok ? 1 : 0, (unsigned)ack, swd_min::ack_to_str(ack));
+  return ok;
+}
+
 static bool cmd_all() {
   if (!cmd_connect()) return false;
   if (!stm32g0_prog::flash_mass_erase()) return false;
@@ -127,6 +206,22 @@ void loop() {
 
     case 'i':
       print_idcode_attempt();
+      break;
+
+    case 't':
+      cmd_swd_smoke_test();
+      break;
+
+    case 'd':
+      cmd_toggle_verbose();
+      break;
+
+    case 'b':
+      cmd_dp_abort_write_test();
+      break;
+
+    case 'c':
+      cmd_ap_csw_write_readback_test();
       break;
 
     case 'r':

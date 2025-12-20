@@ -137,12 +137,12 @@ bool flash_read_bytes(uint32_t addr, uint8_t *out, uint32_t len, uint32_t *flash
   if (!out) return false;
 
   // Follow READ_FLASH.md checklist:
-  // 0) attach + DP init/power-up
+  // Assumption for bench workflow: SWD is already attached (use 'i' first).
+  // 0) DP init/power-up (no reset/reattach here)
   // 1) release NRST
   // 2) short delay
   // 3) halt core
   // 4) perform AHB-AP reads
-  swd_min::reset_and_switch_to_swd();
   if (!swd_min::dp_init_and_power_up()) {
     Serial.println("ERROR: dp_init_and_power_up failed");
     return false;

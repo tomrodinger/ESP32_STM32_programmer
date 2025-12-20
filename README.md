@@ -116,12 +116,12 @@ In this edge-only model, the only legal SWDIO transitions are:
 
 ## Usage
 
-1.  **Hardware Setup**: Wire the ESP32-S3 and STM32G031 according to the table above.
-2.  **Build & Upload**:
-    -   Build the project: `pio run`
-    -   Upload to ESP32-S3: `pio run -t upload`
-3.  **Run**:
-    -   Open the Serial Monitor: `pio device monitor` (baud rate 115200).
+  1.  **Hardware Setup**: Wire the ESP32-S3 and STM32G031 according to the table above.
+  2.  **Build & Upload**:
+     -   Build the project: `pio run`
+     -   Upload to ESP32-S3: `pio run -t upload`
+  3.  **Run**:
+     -   Open the Serial Monitor: `pio device monitor` (baud rate 115200).
     -   Reset the ESP32-S3.
     -   You should see:
         ```
@@ -129,14 +129,25 @@ In this edge-only model, the only legal SWDIO transitions are:
         Firmware Size: 9220 bytes
         Send 'p' to start programming...
         ```
-    -   Use serial commands:
-        - `h` help
-        - `i` reset + read DP IDCODE
-        - `r` read first 8 bytes of target flash @ `0x08000000`
-        - `e` mass erase
-        - `w` write embedded firmware
-        - `v` verify embedded firmware
-        - `a` all (connect+halt, erase, write, verify)
+     -   Use serial commands:
+         - `h` help
+         - `i` reset + read DP IDCODE
+         - `d` toggle SWD verbose diagnostics (prints DP/AP/memory access details)
+         - `t` SWD smoke test (attempts DP power-up handshake + AHB-AP IDR read; may fail on current hardware)
+         - `c` DP CTRL/STAT single-write test (writes DP[0x04]=0x50000000; requires `i` first)
+         - `b` DP ABORT write test (writes DP[0x00]=0x1E under NRST low then high)
+         - `r` read first 8 bytes of target flash @ `0x08000000`
+         - `e` mass erase
+         - `w` write embedded firmware
+         - `v` verify embedded firmware
+         - `a` all (connect+halt, erase, write, verify)
+
+## Known current limitations (bench)
+
+- A DP **IDCODE read** appears to be required before subsequent DP writes will ACK reliably. This is why the workflow is typically:
+  1. Run `i`
+  2. Run other commands (`c`, `t`, `r`, etc.)
+- `r` (flash read) is still failing on current hardware; the SWD attach/no-attach behavior and verbose logging have been improved to aid scope-based debugging.
 
 ## Updating the Firmware
 

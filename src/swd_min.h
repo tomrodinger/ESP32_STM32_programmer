@@ -27,8 +27,17 @@ static constexpr uint8_t ACK_FAULT = 0b100;
 
 void begin(const Pins &pins);
 
+// Enable verbose SWD diagnostics printed to Serial (best for bench debugging).
+// Default: false.
+void set_verbose(bool enabled);
+bool verbose_enabled();
+
 // Drives a reset + SWD line reset + JTAG->SWD sequence.
 void reset_and_switch_to_swd();
+
+// Convenience helper used for the bench-proven “attach + IDCODE read” sequence.
+// This is the only place we print the attach banner lines.
+bool attach_and_read_idcode(uint32_t *idcode_out, uint8_t *ack_out = nullptr);
 
 // Read DP IDCODE (DP register address 0x00).
 // Returns true only if ACK==OK and parity matches.
@@ -70,6 +79,7 @@ bool mem_write32(uint32_t addr, uint32_t val);
 bool mem_read32(uint32_t addr, uint32_t *val_out);
 
 // Helper for printing ACK values.
-const __FlashStringHelper *ack_to_str(uint8_t ack);
+// NOTE: We return a plain C string so it is safe to use with Serial.printf("%s").
+const char *ack_to_str(uint8_t ack);
 
 } // namespace swd_min
