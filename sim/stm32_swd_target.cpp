@@ -19,6 +19,22 @@ static constexpr uint32_t FLASH_KEY1 = 0x45670123u;
 static constexpr uint32_t FLASH_KEY2 = 0xCDEF89ABu;
 
 static constexpr uint32_t FLASH_SR_BSY = (1u << 16);
+static constexpr uint32_t FLASH_SR_EOP = (1u << 0);
+
+// Error flags (subset used by firmware). Bit positions match [`FLASH_ERASE.md`](FLASH_ERASE.md:95).
+static constexpr uint32_t FLASH_SR_OPERR = (1u << 1);
+static constexpr uint32_t FLASH_SR_PROGERR = (1u << 3);
+static constexpr uint32_t FLASH_SR_WRPERR = (1u << 4);
+static constexpr uint32_t FLASH_SR_PGAERR = (1u << 5);
+static constexpr uint32_t FLASH_SR_SIZERR = (1u << 6);
+static constexpr uint32_t FLASH_SR_PGSERR = (1u << 7);
+static constexpr uint32_t FLASH_SR_MISERR = (1u << 8);
+static constexpr uint32_t FLASH_SR_FASTERR = (1u << 9);
+static constexpr uint32_t FLASH_SR_RDERR = (1u << 14);
+static constexpr uint32_t FLASH_SR_OPTVERR = (1u << 15);
+static constexpr uint32_t FLASH_SR_ALL_ERRORS =
+    FLASH_SR_OPERR | FLASH_SR_PROGERR | FLASH_SR_WRPERR | FLASH_SR_PGAERR | FLASH_SR_SIZERR | FLASH_SR_PGSERR |
+    FLASH_SR_MISERR | FLASH_SR_FASTERR | FLASH_SR_RDERR | FLASH_SR_OPTVERR;
 
 static constexpr uint32_t FLASH_CR_PG = (1u << 0);
 static constexpr uint32_t FLASH_CR_MER1 = (1u << 2);
@@ -83,6 +99,11 @@ void Stm32SwdTarget::flash_update_busy() {
 
     // If an erase completed, clear MER1/STRT bits (hardware typically clears STRT)
     flash_cr_ &= ~(FLASH_CR_MER1 | FLASH_CR_STRT);
+
+    // Mark end-of-operation as successful unless error flags were raised.
+    if ((flash_sr_ & FLASH_SR_ALL_ERRORS) == 0) {
+      flash_sr_ |= FLASH_SR_EOP;
+    }
   }
 }
 
@@ -178,11 +199,21 @@ bool Stm32SwdTarget::mem_write32(uint32_t addr, uint32_t v) {
     return true;
   }
 
+  if (addr == FLASH_SR) {
+    // W1C behavior: writing 1 clears the corresponding flags.
+    // Keep BSY read-only here; allow clearing EOP + error flags.
+    const uint32_t w1c_mask = FLASH_SR_EOP | FLASH_SR_ALL_ERRORS;
+    flash_sr_ &= ~(v & w1c_mask);
+    return true;
+  }
+
   if (addr == FLASH_CR) {
     flash_cr_ = v;
 
     // If MER1|STRT is set, start mass erase.
     if ((flash_cr_ & FLASH_CR_MER1) && (flash_cr_ & FLASH_CR_STRT)) {
+      // Starting a new operation clears previous EOP (matches typical flow where firmware clears SR flags).
+      flash_sr_ &= ~FLASH_SR_EOP;
       flash_start_mass_erase();
     }
     return true;

@@ -22,21 +22,40 @@ static constexpr uint32_t FLASH_REG_BASE = 0x40022000u;
 static constexpr uint32_t FLASH_KEYR = FLASH_REG_BASE + 0x08u;
 static constexpr uint32_t FLASH_SR = FLASH_REG_BASE + 0x10u;
 static constexpr uint32_t FLASH_CR = FLASH_REG_BASE + 0x14u;
-static constexpr uint32_t FLASH_OPTR = FLASH_REG_BASE + 0x20u;
+  static constexpr uint32_t FLASH_OPTR = FLASH_REG_BASE + 0x20u;
 
 // Keys
 static constexpr uint32_t FLASH_KEY1 = 0x45670123u;
 static constexpr uint32_t FLASH_KEY2 = 0xCDEF89ABu;
 
-// FLASH_SR bits
-static constexpr uint32_t FLASH_SR_BSY = (1u << 16);
+  // FLASH_SR bits
+  static constexpr uint32_t FLASH_SR_BSY = (1u << 16);
 
-// FLASH_CR bits
-static constexpr uint32_t FLASH_CR_PG = (1u << 0);
-static constexpr uint32_t FLASH_CR_MER1 = (1u << 2);
-// static constexpr uint32_t FLASH_CR_PNB_MASK = (0x7Fu << 3); // (unused: page erase not implemented yet)
-static constexpr uint32_t FLASH_CR_STRT = (1u << 16);
-static constexpr uint32_t FLASH_CR_LOCK = (1u << 31);
+  // FLASH_SR completion + error flags (STM32G031)
+  // Bit positions confirmed in [`FLASH_ERASE.md`](FLASH_ERASE.md:88) via [`docs/stm32g031xx.h`](docs/stm32g031xx.h:2440)
+  static constexpr uint32_t FLASH_SR_EOP = (1u << 0);
+  static constexpr uint32_t FLASH_SR_OPERR = (1u << 1);
+  static constexpr uint32_t FLASH_SR_PROGERR = (1u << 3);
+  static constexpr uint32_t FLASH_SR_WRPERR = (1u << 4);
+  static constexpr uint32_t FLASH_SR_PGAERR = (1u << 5);
+  static constexpr uint32_t FLASH_SR_SIZERR = (1u << 6);
+  static constexpr uint32_t FLASH_SR_PGSERR = (1u << 7);
+  static constexpr uint32_t FLASH_SR_MISERR = (1u << 8);
+  static constexpr uint32_t FLASH_SR_FASTERR = (1u << 9);
+  static constexpr uint32_t FLASH_SR_RDERR = (1u << 14);
+  static constexpr uint32_t FLASH_SR_OPTVERR = (1u << 15);
+  static constexpr uint32_t FLASH_SR_ALL_ERRORS =
+      FLASH_SR_OPERR | FLASH_SR_PROGERR | FLASH_SR_WRPERR | FLASH_SR_PGAERR | FLASH_SR_SIZERR | FLASH_SR_PGSERR |
+      FLASH_SR_MISERR | FLASH_SR_FASTERR | FLASH_SR_RDERR | FLASH_SR_OPTVERR;
+  static constexpr uint32_t FLASH_SR_CLEAR_MASK = FLASH_SR_EOP | FLASH_SR_ALL_ERRORS;
+
+  // FLASH_CR bits
+  static constexpr uint32_t FLASH_CR_PG = (1u << 0);
+  static constexpr uint32_t FLASH_CR_PER = (1u << 1);
+  static constexpr uint32_t FLASH_CR_MER1 = (1u << 2);
+  // static constexpr uint32_t FLASH_CR_PNB_MASK = (0x7Fu << 3); // (unused: page erase not implemented yet)
+  static constexpr uint32_t FLASH_CR_STRT = (1u << 16);
+  static constexpr uint32_t FLASH_CR_LOCK = (1u << 31);
 
 static bool wait_flash_not_busy(uint32_t timeout_ms) {
   const uint32_t start = millis();
@@ -66,6 +85,13 @@ static bool flash_unlock() {
   return true;
 }
 
+static bool flash_clear_sr_flags(uint32_t mask) {
+  // STM32G0: FLASH_SR flags are W1C (write 1 to clear) per ST HAL
+  // See: [`FLASH_ERASE.md`](FLASH_ERASE.md:110) and [`docs/stm32g0xx_hal_flash.h`](docs/stm32g0xx_hal_flash.h:786)
+  if ((mask & FLASH_SR_CLEAR_MASK) == 0) return true;
+  return swd_min::mem_write32(FLASH_SR, mask & FLASH_SR_CLEAR_MASK);
+}
+
 static bool flash_clear_cr_bits(uint32_t mask) {
   uint32_t cr = 0;
   if (!swd_min::mem_read32(FLASH_CR, &cr)) return false;
@@ -82,7 +108,11 @@ bool connect_and_halt() {
     return false;
   }
 
-  // Leave NRST asserted for now; halt should still work since debug is powered.
+  // For flash operations, do not keep the target held in reset.
+  // See safety note in [`FLASH_ERASE.md`](FLASH_ERASE.md:139).
+  swd_min::set_nrst(false);
+  delay(5);
+
   // Enable debug + halt core.
   if (!swd_min::mem_write32(DHCSR, DHCSR_C_DEBUGEN_C_HALT)) {
     Serial.println("ERROR: write DHCSR failed");
@@ -168,11 +198,22 @@ bool flash_read_bytes(uint32_t addr, uint8_t *out, uint32_t len, uint32_t *flash
 }
 
 bool flash_mass_erase() {
+  // Implements the checklist in [`FLASH_ERASE.md`](FLASH_ERASE.md:131).
   if (!wait_flash_not_busy(/*timeout_ms=*/5000)) {
     Serial.println("ERROR: flash busy timeout before erase");
     return false;
   }
+
+  // Clear completion + error flags before starting.
+  if (!flash_clear_sr_flags(FLASH_SR_CLEAR_MASK)) {
+    Serial.println("ERROR: failed to clear FLASH_SR flags");
+    return false;
+  }
+
   if (!flash_unlock()) return false;
+
+  // Clear potentially-conflicting control bits.
+  if (!flash_clear_cr_bits(FLASH_CR_PG | FLASH_CR_PER)) return false;
 
   Serial.println("Mass erase (MER1)...");
 
@@ -185,8 +226,25 @@ bool flash_mass_erase() {
     return false;
   }
 
-  // Clear MER1 + STRT (best practice)
+  // Check outcome.
+  uint32_t sr = 0;
+  if (!swd_min::mem_read32(FLASH_SR, &sr)) return false;
+  if (sr & FLASH_SR_ALL_ERRORS) {
+    Serial.printf("ERROR: flash erase error flags set: FLASH_SR=0x%08lX\n", (unsigned long)sr);
+    (void)flash_clear_sr_flags(sr);
+    return false;
+  }
+  if ((sr & FLASH_SR_EOP) == 0) {
+    Serial.printf("ERROR: flash erase did not set EOP: FLASH_SR=0x%08lX\n", (unsigned long)sr);
+    return false;
+  }
+
+  // Clear EOP (and any errors if they appeared between reads).
+  if (!flash_clear_sr_flags(FLASH_SR_CLEAR_MASK)) return false;
+
+  // Clear MER1 + STRT and lock.
   if (!flash_clear_cr_bits(FLASH_CR_MER1 | FLASH_CR_STRT)) return false;
+  if (!swd_min::mem_write32(FLASH_CR, FLASH_CR_LOCK)) return false;
 
   Serial.println("Mass erase done");
   return true;

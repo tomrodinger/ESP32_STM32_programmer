@@ -13,3 +13,7 @@ Refer to `README.md` for project details and architecture.
 7. **No hallucinated low-level constants**: For register addresses, bit positions, magic keys, and protocol sequences (SWD/ADIv5/FLASH), you MUST cite an authoritative source. Preferred order: (1) ST reference manual (e.g., RM0444), (2) ST CMSIS device headers (e.g., [`docs/stm32g031xx.h`](docs/stm32g031xx.h:1)), (3) ST HAL headers (e.g., [`docs/stm32g0xx_hal_flash.h`](docs/stm32g0xx_hal_flash.h:1)). If you cannot cite it, mark it as unknown.
 8. **Using Perplexity**: Use Perplexity to extract implementation-ready specifics from authoritative docs (not to fetch “links”). If Perplexity output is missing a required numeric detail, re-query until you get it or find the value in ST headers within the repo.
 9. **Python dependencies**: If you need to install Python packages for helper scripts/tools, use a local virtual environment (e.g. `python3 -m venv .venv` + activate) and do not install into the system Python.
+
+10. **No warnings accepted**: Treat compiler warnings as failures. If you see warnings in CI / `cmake --build` / `pio run`, fix them (or justify and suppress them explicitly with a comment) before proceeding.
+
+11. **Do not revert/undo human changes by assumption**: If you notice changes you did not make (e.g. unstaged diffs / modified files), do **not** try to “restore” or “undo” them automatically. First assess whether they are sensible; if unsure, ask the human. Never make assumptions that silently override human edits.

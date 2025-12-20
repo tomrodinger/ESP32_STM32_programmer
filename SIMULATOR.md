@@ -168,6 +168,7 @@ Run one of the standalone sims (writes CSV into the repo root):
   ./sim/build/read_then_write_simulation
   ./sim/build/write_then_read_simulation
   ./sim/build/read_flash_simulation
+  ./sim/build/erase_flash_simulation
 ```
 
 View a CSV in the browser (generates `waveforms.html` and opens it):
@@ -179,6 +180,7 @@ View a CSV in the browser (generates `waveforms.html` and opens it):
   python3 viewer/view_log.py read_then_write_simulation.csv
   python3 viewer/view_log.py write_then_read_simulation.csv
   python3 viewer/view_log.py read_flash_simulation.csv
+  python3 viewer/view_log.py erase_flash_simulation.csv
 ```
 
 Note: [`viewer/view_log.py`](viewer/view_log.py:1) writes an HTML file next to the CSV with the same basename, e.g. `read_simulation.csv` -> `read_simulation.html`.
