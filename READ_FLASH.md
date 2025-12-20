@@ -7,6 +7,8 @@ Goal: implement the **simplest possible proof** that we can read STM32G031 inter
 
 This doc is written as an **implementation checklist** with **confirmed constants/behaviors** from Arm ADIv5 and ST sources, and calls out anything that is **NOT guaranteed**.
 
+Key improvement vs earlier drafts: wherever possible, numeric constants are now taken directly from **ST CMSIS/HAL headers checked into this repo** (see “ST sources” below), so we’re not depending on “memory” or vague summaries.
+
 ## Authoritative sources used
 
 ### Arm (ADIv5 / SWD / AP semantics)
@@ -24,11 +26,32 @@ This doc is written as an **implementation checklist** with **confirmed constant
 - STM32G031 datasheet (flash base, operating conditions):
   - https://www.st.com/resource/en/datasheet/stm32g031c6.pdf
 
+#### ST headers vendored into this repo (implementation-ready)
+
+- STM32G031 CMSIS device header: [`docs/stm32g031xx.h`](docs/stm32g031xx.h:1)
+- STM32G0 HAL flash header: [`docs/stm32g0xx_hal_flash.h`](docs/stm32g0xx_hal_flash.h:1)
+
 ## What we already have in this repo
 
 - SWD line reset + JTAG→SWD sequence while holding NRST low: [`swd_min::reset_and_switch_to_swd()`](src/swd_min.cpp:392)
 - DP init + power-up handshake + sticky clear (ABORT): [`swd_min::dp_init_and_power_up()`](src/swd_min.cpp:423)
 - AHB-AP memory read/write helpers: [`swd_min::mem_read32()`](src/swd_min.cpp:493) / [`swd_min::mem_write32()`](src/swd_min.cpp:482)
+
+## STM32G031 flash address and flash-register base (confirmed from CMSIS header)
+
+From [`docs/stm32g031xx.h`](docs/stm32g031xx.h:552):
+
+- Main flash base: `FLASH_BASE = 0x08000000` ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:557))
+
+Flash register block base (FLASH_R) is derived as:
+
+- `PERIPH_BASE = 0x40000000` ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:559))
+- `AHBPERIPH_BASE = PERIPH_BASE + 0x00020000` ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:567))
+- `FLASH_R_BASE = AHBPERIPH_BASE + 0x00002000` ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:604))
+
+So:
+
+- FLASH registers base address is **0x40022000**.
 
 ## Confirmed ADIv5 DP register addresses used by SWD
 
@@ -79,8 +102,8 @@ These are the standard MEM-AP bank-0 registers (also already in our repo):
 
 Action item for firmware correctness:
 
-- Start with the current minimal CSW approach (because it already works for IDCODE and is simplest).
-- If memory reads fail on real hardware, we may need to expand CSW to include PROT bits.
+- Start with the current minimal CSW approach (because it works in the simulator and is simplest): [`swd_min::mem_read32()`](src/swd_min.cpp:493).
+- If memory reads fail on real hardware, add a second “CSW preset” that includes PROT bits (matching known-good OpenOCD-style CSW) and test.
 
 ## Confirmed posted-read semantics (how to get real data)
 
@@ -108,7 +131,7 @@ We already implement this approach in [`swd_min::reset_and_switch_to_swd()`](src
 
 ### Flash address range / base
 
-- Main flash starts at **0x0800_0000** (datasheet).
+- Main flash starts at **0x0800_0000** (datasheet; also `FLASH_BASE` in [`docs/stm32g031xx.h`](docs/stm32g031xx.h:557)).
 
 ### RDP levels (read-out protection) and debug reads
 
@@ -127,6 +150,17 @@ Depending on silicon/debug implementation you might observe any of:
 - core-side fault/reset side effects
 
 Because the ST materials emphasize *access is forbidden* (not a specific bus-return pattern), the implementation must treat “can’t read flash” as a generic failure and not pattern-match on returned values.
+
+Implementation-ready: reading the RDP field
+
+- RDP lives in the flash option register field `FLASH_OPTR.RDP` (mask `0xFF` at bit position 0) ([`FLASH_OPTR_RDP`](docs/stm32g031xx.h:2543)).
+- `FLASH_OPTR` register offset is `0x20` within FLASH_R (see `FLASH_TypeDef` layout) ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:248)).
+- Therefore `FLASH_OPTR` absolute address is `0x40022000 + 0x20 = 0x40022020`.
+
+Note:
+
+- This lets us add a *diagnostic* step: attempt to read `FLASH_OPTR` via AHB-AP and print the low byte. If that fails, treat it like any other access failure.
+- The exact semantic mapping of RDP byte values to “L0/L1/L2” should be pulled from RM0444 and/or the ST security training deck; we do not encode those values here.
 
 ### Is flash readable while NRST is held low?
 
@@ -174,6 +208,12 @@ This gives the highest probability of reliable flash reads.
 6. Read word1 at 0x0800_0004:
    - call [`swd_min::mem_read32()`](src/swd_min.h:70) with `0x08000004`
 
+Optional diagnostic read (recommended):
+
+7. Read `FLASH_OPTR` at 0x40022020 and print low byte:
+   - helps identify “protection configuration” vs “wiring/protocol failure”
+   - address derivation is confirmed above and in [`docs/stm32g031xx.h`](docs/stm32g031xx.h:604)
+
 ### Step 4 — Print as 8 bytes
 
 7. Convert (little-endian) and print:
@@ -206,3 +246,12 @@ When RDP is Level 0, the first 8 bytes at 0x0800_0000 are the start of the vecto
 
 So if you read values resembling `0x2000....` then `0x0800....`, your read path is very likely correct.
 
+## Cross-check with STM32G0 flash SR/CR bits (why reading is “simple”)
+
+Reading flash (unlike erase/program) does *not* require unlocking flash control registers.
+
+The flash control/status definitions that matter for erase/program are still useful as debug signals when something goes wrong:
+
+- `FLASH_SR_RDERR` exists (bit 14) ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:2468)) and can indicate issues related to PCROP reads on devices that support it.
+
+We do **not** currently read/clear these flags in the SWD read path; we only mention them here so you know where to look when diagnosing access issues.
