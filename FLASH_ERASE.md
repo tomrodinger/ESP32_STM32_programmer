@@ -15,7 +15,10 @@ It is written to be used as a checklist so we can later implement the procedure 
 
 Notes:
 
-- I was not able to reliably fetch RM0444 content from within this workspace due to network transfer issues, so this file intentionally **avoids hard-coding bit numbers/offsets beyond what is already in our code** and instead focuses on the **procedure** and **what to verify** from RM0444 when implementing.
+- RM0444 is the authoritative source.
+- For implementation-ready numeric values (addresses, bit positions, and key constants), we can also rely on the **ST CMSIS device header** for STM32G031 and the **ST HAL flash header**, both of which are derived from RM0444.
+  - CMSIS device header: [`docs/stm32g031xx.h`](docs/stm32g031xx.h:1)
+  - HAL flash header: [`docs/stm32g0xx_hal_flash.h`](docs/stm32g0xx_hal_flash.h:1)
 
 ## Scope / assumptions
 
@@ -23,6 +26,94 @@ Notes:
 - Target: **STM32G031** (single-bank flash device in STM32G0 family).
 - Host: ESP32-S3 bit-banging SWD and doing memory-mapped register access (see [`swd_min::mem_write32()`](src/swd_min.h:69)).
 - The SWD attach strategy currently holds NRST low during initial attach (see [`swd_min::reset_and_switch_to_swd()`](src/swd_min.cpp:392)).
+
+## Confirmed register map and bitfields (implementation-ready)
+
+Everything in this section is taken directly from ST headers already in this repo:
+
+- [`docs/stm32g031xx.h`](docs/stm32g031xx.h:240) (STM32G031 CMSIS device header)
+- [`docs/stm32g0xx_hal_flash.h`](docs/stm32g0xx_hal_flash.h:140) (STM32G0 HAL flash header)
+
+### Flash registers base address (FLASH_R)
+
+From the STM32G031 memory map:
+
+- `PERIPH_BASE = 0x40000000` ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:559))
+- `AHBPERIPH_BASE = PERIPH_BASE + 0x00020000 = 0x40020000` ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:567))
+- `FLASH_R_BASE = AHBPERIPH_BASE + 0x00002000 = 0x40022000` ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:604))
+
+So:
+
+- **FLASH register base address** (FLASH_R): `0x40022000`
+
+### Flash register offsets
+
+The FLASH register block layout is defined by `FLASH_TypeDef`:
+
+- `FLASH_ACR` offset `0x00` ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:250))
+- `FLASH_KEYR` offset `0x08` ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:252))
+- `FLASH_OPTKEYR` offset `0x0C` ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:253))
+- `FLASH_SR` offset `0x10` ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:254))
+- `FLASH_CR` offset `0x14` ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:255))
+- `FLASH_OPTR` offset `0x20` ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:258))
+
+Computed absolute addresses (FLASH_R_BASE + offset):
+
+- `FLASH_ACR  = 0x40022000 + 0x00 = 0x40022000`
+- `FLASH_KEYR = 0x40022000 + 0x08 = 0x40022008`
+- `FLASH_OPTKEYR = 0x40022000 + 0x0C = 0x4002200C`
+- `FLASH_SR  = 0x40022000 + 0x10 = 0x40022010`
+- `FLASH_CR  = 0x40022000 + 0x14 = 0x40022014`
+- `FLASH_OPTR = 0x40022000 + 0x20 = 0x40022020`
+
+### Flash unlock keys (confirmed)
+
+From ST HAL:
+
+- `FLASH_KEY1 = 0x45670123` ([`docs/stm32g0xx_hal_flash.h`](docs/stm32g0xx_hal_flash.h:158))
+- `FLASH_KEY2 = 0xCDEF89AB` ([`docs/stm32g0xx_hal_flash.h`](docs/stm32g0xx_hal_flash.h:158))
+
+### FLASH_CR bits used for mass erase (confirmed)
+
+From the bit definitions:
+
+- `FLASH_CR_PG` bit **0** ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:2482))
+- `FLASH_CR_PER` bit **1** ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:2485))
+- `FLASH_CR_MER1` bit **2** ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:2488))
+- `FLASH_CR_STRT` bit **16** ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:2494))
+- `FLASH_CR_LOCK` bit **31** ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:2521))
+
+STM32G031 is single-bank, and the STM32G031 header defines only `MER1` (no `MER2`).
+
+### FLASH_SR bits used for erase (confirmed)
+
+Busy and completion:
+
+- `FLASH_SR_EOP` bit **0** ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:2441))
+- `FLASH_SR_BSY1` bit **16** ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:2474))
+
+Error flags (all must be checked and cleared as needed):
+
+- `FLASH_SR_OPERR` bit **1** ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:2444))
+- `FLASH_SR_PROGERR` bit **3** ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:2447))
+- `FLASH_SR_WRPERR` bit **4** ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:2450))
+- `FLASH_SR_PGAERR` bit **5** ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:2453))
+- `FLASH_SR_SIZERR` bit **6** ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:2456))
+- `FLASH_SR_PGSERR` bit **7** ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:2459))
+- `FLASH_SR_MISERR` bit **8** ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:2462))
+- `FLASH_SR_FASTERR` bit **9** ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:2465))
+- `FLASH_SR_RDERR` bit **14** ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:2468))
+- `FLASH_SR_OPTVERR` bit **15** ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:2471))
+
+`FLASH_SR_CFGBSY` bit **18** exists as well (config busy) ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:2477)); treat it like a busy condition for option-byte operations.
+
+### How to clear flags (W1C confirmed)
+
+ST HAL’s clear-flag macro shows how status flags are cleared:
+
+- For SR flags, it does: `FLASH->SR = (1uL << (bit_index))` ([`docs/stm32g0xx_hal_flash.h`](docs/stm32g0xx_hal_flash.h:786))
+
+So: **clear `FLASH_SR_*` flags by writing 1 to the corresponding bit in `FLASH_SR`**.
 
 ## High-level sequence (what must happen)
 
@@ -41,9 +132,14 @@ Notes:
 
 ### 0) Preconditions / environmental constraints
 
-- **Power supply** must be stable and within datasheet limits (STM32G031 VDD operating range is 1.7–3.6 V; practical robustness for erase/program is best near 3.0–3.6 V).
+- **Power supply** must be stable and within datasheet limits (STM32G031 VDD operating range is 1.7–3.6 V per datasheet).
 - Avoid brown-out resets during erase (BOR/PVD configuration matters in production).
 - If a watchdog (IWDG/WWDG) could be active, ensure it cannot reset the MCU during erase (either disable it earlier in the flow, or refresh it from a RAM-resident loop).
+
+NRST note (important for this project):
+
+- Our SWD attach currently holds NRST low during early debug attach (see [`swd_min::reset_and_switch_to_swd()`](src/swd_min.cpp:392)). This is known-good for reading DP IDCODE.
+- It is **not guaranteed** (without an RM0444 quote) that flash erase operations are valid while NRST remains asserted. For safety, plan on **releasing NRST high** before performing flash operations (erase/program), then halting the core.
 
 ### 1) Connect, power-up debug, and halt core
 
@@ -59,7 +155,7 @@ Why halting matters:
 
 ### 2) Ensure flash controller is idle
 
-- Read FLASH status register (FLASH_SR) and confirm **BSY == 0**.
+- Read FLASH status register (FLASH_SR) and confirm **BSY1 == 0** ([`FLASH_SR_BSY1`](docs/stm32g031xx.h:2474)).
 - If BSY stays set beyond a reasonable timeout, treat it as a failure.
 
 Implementation note:
@@ -70,8 +166,16 @@ Implementation note:
 
 Before starting *any* new erase:
 
-- Clear EOP (end-of-operation) if set.
-- Clear all error flags that are “write 1 to clear” (typical STM32 set: OPERR/PROGERR/WRPERR/… — exact names vary by family; confirm for STM32G0 in RM0444).
+- Clear `EOP` (end-of-operation) if set.
+- Clear all error flags by W1C writes.
+
+Concrete list of SR flags to clear for STM32G031 (from [`docs/stm32g031xx.h`](docs/stm32g031xx.h:2440)):
+
+- `EOP`, `OPERR`, `PROGERR`, `WRPERR`, `PGAERR`, `SIZERR`, `PGSERR`, `MISERR`, `FASTERR`, `RDERR`, `OPTVERR`.
+
+Implementation detail:
+
+- You may clear them one-by-one (write `1<<bit`) as ST HAL does ([`__HAL_FLASH_CLEAR_FLAG`](docs/stm32g0xx_hal_flash.h:786)), or clear multiple at once by writing an OR-mask to `FLASH_SR`.
 
 Why do this:
 
@@ -86,8 +190,8 @@ Why do this:
 
 The STM32G0 flash uses the canonical ST key pair (documented in RM0444 and already used in our code):
 
-- KEY1 = `0x45670123`
-- KEY2 = `0xCDEF89AB`
+- KEY1 = `0x45670123` ([`docs/stm32g0xx_hal_flash.h`](docs/stm32g0xx_hal_flash.h:158))
+- KEY2 = `0xCDEF89AB` ([`docs/stm32g0xx_hal_flash.h`](docs/stm32g0xx_hal_flash.h:158))
 
 In this repo: [`flash_unlock()`](src/stm32g0_prog.cpp:52)
 
@@ -97,13 +201,13 @@ Important robustness detail:
 
 ### 5) Configure mass erase (STM32G031: single bank)
 
-- Ensure no page erase/program bits are set in FLASH_CR (clear PER/PG etc.).
-- Set the **mass erase** request bit for Bank 1 (commonly named `MER1` in STM32G0).
+- Ensure no page erase/program bits are set in `FLASH_CR` (clear `PG`/`PER` etc.) ([`FLASH_CR_PG`](docs/stm32g031xx.h:2482), [`FLASH_CR_PER`](docs/stm32g031xx.h:2485)).
+- Set the **mass erase** request bit for Bank 1: `MER1` ([`FLASH_CR_MER1`](docs/stm32g031xx.h:2488)).
   - STM32G031 is single-bank, so `MER2` (if present on larger parts) is not used.
 
 ### 6) Start the mass erase
 
-- Set the start bit (commonly named `STRT`).
+- Set the start bit `STRT` ([`FLASH_CR_STRT`](docs/stm32g031xx.h:2494)).
 - After this write, BSY should become 1 soon after.
 
 ### 7) Poll for completion and validate outcome
@@ -121,6 +225,10 @@ Protection-related failure modes to account for:
   - RDP Level 1: debug access to flash is restricted; lowering RDP back to 0 triggers an *automatic mass erase* as part of the transition.
   - RDP Level 2: debug access is disabled/irreversible for production (no SWD erase).
 
+Important completeness note:
+
+- The exact “symptom” of RDP/WRP/PCROP blocking mass erase (e.g. which FLASH_SR bits set, whether AHB-AP access faults, etc.) must be confirmed from ST docs / RM0444; don’t pattern-match on a single returned value.
+
 ### 8) Clear completion + error flags
 
 - Clear EOP and any error flags (write-1-to-clear bits in FLASH_SR).
@@ -128,8 +236,8 @@ Protection-related failure modes to account for:
 
 ### 9) Clear erase bits and re-lock flash
 
-- Clear the mass erase request bit(s) (`MER1`) and start bit (`STRT`) in FLASH_CR.
-- Set FLASH_CR.LOCK to re-lock control.
+- Clear `MER1` and `STRT` in `FLASH_CR`.
+- Set `LOCK` to re-lock control ([`FLASH_CR_LOCK`](docs/stm32g031xx.h:2521)).
 
 ### 10) Verify memory is erased
 
@@ -140,12 +248,14 @@ Protection-related failure modes to account for:
 
 ## Notes on caches / prefetch
 
-STM32G0 flash includes instruction cache and prefetch features (FLASH_ACR). The ST training material calls out that cache/prefetch improve performance but can create coherency issues around flash operations. Recommended safe pattern:
+STM32G0 flash includes memory acceleration features controlled by `FLASH_ACR` (see ST training deck “STM32G0 – Memory Flash”). Those features are primarily relevant when the **CPU resumes executing from flash** after a program/erase.
+
+Engineering best practice pattern (optional; verify exact bits in RM0444 before doing it):
 
 - Disable prefetch / instruction cache before erase/program.
 - After operation: reset (invalidate) cache, then re-enable.
 
-This is most relevant if the target will *resume execution* immediately after programming; since we’re halting via SWD and then programming, we should still follow the safest sequence.
+This is most relevant if the target will *resume execution* immediately after programming. For a minimal “mass erase while halted” proof, cache/prefetch manipulation is not strictly required.
 
 ## Comparison vs current implementation in this repo (what to check)
 
@@ -153,7 +263,7 @@ Current mass erase implementation: [`stm32g0_prog::flash_mass_erase()`](src/stm3
 
 Items that must be verified/updated when we implement the “final” production-safe erase:
 
-1. **BSY bit mask**: our code currently defines `FLASH_SR_BSY = (1u << 16)` in [`src/stm32g0_prog.cpp`](src/stm32g0_prog.cpp:31). This must be checked against RM0444 for STM32G0, because on many STM32 families BSY is bit 0.
+1. **BSY bit mask**: our code currently defines `FLASH_SR_BSY = (1u << 16)` in [`src/stm32g0_prog.cpp`](src/stm32g0_prog.cpp:31). This matches `FLASH_SR_BSY1_Pos = 16` in [`docs/stm32g031xx.h`](docs/stm32g031xx.h:2474).
 2. **Status flag clearing**: current code does not clear EOP/error flags before/after erase. Add it.
 3. **Error handling**: current code only times out on busy; it does not examine FLASH_SR error flags after erase.
 4. **Locking**: current code clears MER1/STRT but does not explicitly set FLASH_CR.LOCK at end.
@@ -176,4 +286,3 @@ This is the procedure we should implement (in RAM on target is not applicable he
 11. Clear MER1/STRT in FLASH_CR.
 12. Set LOCK in FLASH_CR.
 13. Verify flash words == 0xFFFFFFFF.
-
