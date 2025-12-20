@@ -13,6 +13,7 @@ static constexpr uint32_t FLASH_REG_BASE = 0x40022000u;
 static constexpr uint32_t FLASH_KEYR = FLASH_REG_BASE + 0x08u;
 static constexpr uint32_t FLASH_SR = FLASH_REG_BASE + 0x10u;
 static constexpr uint32_t FLASH_CR = FLASH_REG_BASE + 0x14u;
+static constexpr uint32_t FLASH_OPTR = FLASH_REG_BASE + 0x20u;
 
 static constexpr uint32_t FLASH_KEY1 = 0x45670123u;
 static constexpr uint32_t FLASH_KEY2 = 0xCDEF89ABu;
@@ -23,6 +24,10 @@ static constexpr uint32_t FLASH_CR_PG = (1u << 0);
 static constexpr uint32_t FLASH_CR_MER1 = (1u << 2);
 static constexpr uint32_t FLASH_CR_STRT = (1u << 16);
 static constexpr uint32_t FLASH_CR_LOCK = (1u << 31);
+
+// RDP option-byte values from ST HAL header (implementation-ready, matches STM32G0 series).
+// See: OB_RDP_LEVEL_* in [`docs/stm32g0xx_hal_flash.h`](docs/stm32g0xx_hal_flash.h:320)
+static constexpr uint32_t OB_RDP_LEVEL_0 = 0x000000AAu;
 
 // DP registers (addr bits [3:2] in request select these byte addresses)
 static constexpr uint8_t DP_ADDR_IDCODE = 0x00;
@@ -51,7 +56,19 @@ void Stm32SwdTarget::flash_reset() {
   flash_keyr_last_ = 0;
   flash_sr_ = 0;
   flash_cr_ = FLASH_CR_LOCK;
+  flash_optr_ = OB_RDP_LEVEL_0; // default to RDP0 (debug reads permitted)
   flash_bsy_clear_time_ns_ = 0;
+}
+
+void Stm32SwdTarget::load_flash_image(const uint8_t *data, size_t len) {
+  if (!data || len == 0) return;
+  if (flash_.empty()) {
+    // Defensive: ensure flash exists even if caller invoked load before reset().
+    flash_reset();
+  }
+
+  const size_t n = std::min(len, flash_.size());
+  std::memcpy(flash_.data(), data, n);
 }
 
 void Stm32SwdTarget::flash_start_busy(uint64_t duration_ns) {
@@ -134,6 +151,10 @@ bool Stm32SwdTarget::mem_read32(uint32_t addr, uint32_t &out) {
   }
   if (addr == FLASH_CR) {
     out = flash_cr_;
+    return true;
+  }
+  if (addr == FLASH_OPTR) {
+    out = flash_optr_;
     return true;
   }
 

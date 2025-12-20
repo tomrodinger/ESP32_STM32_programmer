@@ -22,6 +22,7 @@ static constexpr uint32_t FLASH_REG_BASE = 0x40022000u;
 static constexpr uint32_t FLASH_KEYR = FLASH_REG_BASE + 0x08u;
 static constexpr uint32_t FLASH_SR = FLASH_REG_BASE + 0x10u;
 static constexpr uint32_t FLASH_CR = FLASH_REG_BASE + 0x14u;
+static constexpr uint32_t FLASH_OPTR = FLASH_REG_BASE + 0x20u;
 
 // Keys
 static constexpr uint32_t FLASH_KEY1 = 0x45670123u;
@@ -32,7 +33,6 @@ static constexpr uint32_t FLASH_SR_BSY = (1u << 16);
 
 // FLASH_CR bits
 static constexpr uint32_t FLASH_CR_PG = (1u << 0);
-static constexpr uint32_t FLASH_CR_PER = (1u << 1);
 static constexpr uint32_t FLASH_CR_MER1 = (1u << 2);
 // static constexpr uint32_t FLASH_CR_PNB_MASK = (0x7Fu << 3); // (unused: page erase not implemented yet)
 static constexpr uint32_t FLASH_CR_STRT = (1u << 16);
@@ -99,6 +99,71 @@ bool connect_and_halt() {
   }
 
   Serial.println("WARN: core did not report HALT; continuing anyway");
+  return true;
+}
+
+bool flash_read_bytes(uint32_t addr, uint8_t *out, uint32_t len, uint32_t *flash_optr_out) {
+  if (len == 0) return true;
+  if (!out) return false;
+
+  // Follow READ_FLASH.md checklist:
+  // 0) attach + DP init/power-up
+  // 1) release NRST
+  // 2) short delay
+  // 3) halt core
+  // 4) perform AHB-AP reads
+  swd_min::reset_and_switch_to_swd();
+  if (!swd_min::dp_init_and_power_up()) {
+    Serial.println("ERROR: dp_init_and_power_up failed");
+    return false;
+  }
+
+  // Recommended: don't keep target held in reset for memory reads.
+  swd_min::set_nrst(false);
+  delay(5);
+
+  // Halt core (best-effort). We deliberately avoid calling connect_and_halt() because it would
+  // re-run reset_and_switch_to_swd() and re-assert NRST.
+  if (!swd_min::mem_write32(DHCSR, DHCSR_C_DEBUGEN_C_HALT)) {
+    Serial.println("ERROR: write DHCSR failed");
+    return false;
+  }
+  for (int i = 0; i < 50; i++) {
+    uint32_t dhcsr = 0;
+    if (swd_min::mem_read32(DHCSR, &dhcsr) && (dhcsr & DHCSR_S_HALT)) break;
+    delay(1);
+  }
+
+  if (flash_optr_out) {
+    uint32_t optr = 0;
+    if (swd_min::mem_read32(FLASH_OPTR, &optr)) {
+      *flash_optr_out = optr;
+    } else {
+      // If we can't read it, still continue with the flash read attempt.
+      *flash_optr_out = 0;
+    }
+  }
+
+  // Read bytes via 32-bit transfers.
+  // Keep it simple: read 32-bit words and memcpy out; support unaligned/odd lengths.
+  uint32_t off = 0;
+  while (off < len) {
+    const uint32_t aligned_addr = (addr + off) & ~0x3u;
+    uint32_t word = 0;
+    if (!swd_min::mem_read32(aligned_addr, &word)) {
+      Serial.printf("ERROR: mem_read32 failed at 0x%08lX\n", (unsigned long)aligned_addr);
+      return false;
+    }
+
+    uint8_t bytes[4];
+    memcpy(bytes, &word, 4);
+    for (uint32_t i = 0; i < 4 && off < len; i++) {
+      const uint32_t a = aligned_addr + i;
+      if (a < addr) continue;
+      out[off++] = bytes[i];
+    }
+  }
+
   return true;
 }
 

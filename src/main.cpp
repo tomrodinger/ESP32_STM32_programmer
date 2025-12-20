@@ -10,6 +10,7 @@ static void print_help() {
   Serial.println("Commands:");
   Serial.println("  h = help");
   Serial.println("  i = reset + read DP IDCODE");
+  Serial.println("  r = read first 8 bytes of target flash @ 0x08000000");
   Serial.println("  e = erase entire flash (mass erase)");
   Serial.println("  w = write firmware to flash");
   Serial.println("  v = verify firmware in flash (dumps bytes read + mismatch count)");
@@ -61,6 +62,29 @@ static bool cmd_verify() {
   return ok;
 }
 
+static bool cmd_read_flash_first_8() {
+  Serial.println("Reading first 8 bytes of target flash via SWD...");
+
+  uint8_t buf[8] = {0};
+  uint32_t optr = 0;
+  const bool ok = stm32g0_prog::flash_read_bytes(/*addr=*/stm32g0_prog::FLASH_BASE, buf, /*len=*/8, &optr);
+
+  if (!ok) {
+    Serial.println("Read FAIL");
+    return false;
+  }
+
+  Serial.printf("FLASH_OPTR @ 0x40022020 = 0x%08lX (RDP byte=0x%02X)\n", (unsigned long)optr,
+                (unsigned)((optr >> 0) & 0xFFu));
+
+  Serial.printf("0x%08lX: ", (unsigned long)stm32g0_prog::FLASH_BASE);
+  for (int i = 0; i < 8; i++) {
+    Serial.printf("%02X ", buf[i]);
+  }
+  Serial.println();
+  return true;
+}
+
 static bool cmd_all() {
   if (!cmd_connect()) return false;
   if (!stm32g0_prog::flash_mass_erase()) return false;
@@ -103,6 +127,10 @@ void loop() {
 
     case 'i':
       print_idcode_attempt();
+      break;
+
+    case 'r':
+      cmd_read_flash_first_8();
       break;
 
     case 'e':

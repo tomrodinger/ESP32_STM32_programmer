@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 #include <vector>
 
 namespace sim {
@@ -9,8 +10,13 @@ namespace sim {
 // - Minimal DP/AP implementation sufficient for swd_min::dp_* and AHB-AP memory access.
 // - Memory map includes a simulated STM32G0 flash array + flash controller registers.
 class Stm32SwdTarget {
-public:
+ public:
   void reset();
+
+  // Initialize flash contents from a binary blob.
+  // Bytes are copied to FLASH_BASE..FLASH_BASE+N-1; any remaining flash bytes keep their existing
+  // value (typically 0xFF after reset, or whatever your test wants).
+  void load_flash_image(const uint8_t *data, size_t len);
 
   // Update simulated time (used for FLASH_SR.BSY timing).
   void set_time_ns(uint64_t t_ns) { t_ns_ = t_ns; }
@@ -59,7 +65,7 @@ public:
   // Config
   void set_idcode(uint32_t idcode) { dp_idcode_ = idcode; }
 
-private:
+ private:
   // --- SWD protocol state machine ---
   enum class Phase : uint8_t {
     AwaitResetOrSeq,
@@ -172,6 +178,7 @@ private:
   uint32_t flash_keyr_last_ = 0;
   uint32_t flash_sr_ = 0;
   uint32_t flash_cr_ = 0x80000000u; // LOCK set after reset
+  uint32_t flash_optr_ = 0;
 
   uint64_t flash_bsy_clear_time_ns_ = 0;
 };

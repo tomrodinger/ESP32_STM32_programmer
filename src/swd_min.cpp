@@ -96,7 +96,9 @@ static inline uint8_t parity_u32(uint32_t v) {
 static inline void line_idle_cycles(uint32_t cycles);
 static inline void line_idle_cycles_low(uint32_t cycles);
 
-static inline void swd_line_idle_cycles(uint32_t cycles) { line_idle_cycles(cycles); }
+// Reserved for potential future use: explicit SWD idle cycles helper.
+// (Keep unused to avoid warnings on some builds.)
+// static inline void swd_line_idle_cycles(uint32_t cycles) { line_idle_cycles(cycles); }
 
 static bool dp_write(uint8_t addr, uint32_t val, uint8_t *ack_out);
 static bool ap_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out);

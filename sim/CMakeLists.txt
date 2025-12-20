@@ -125,3 +125,24 @@ target_include_directories(write_then_read_simulation PRIVATE
 if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang|GNU")
   target_compile_options(write_then_read_simulation PRIVATE -Wall -Wextra -Wpedantic)
 endif()
+
+add_executable(read_flash_simulation
+  read_flash_simulation_main.cpp
+  arduino_compat/arduino_compat.cpp
+  gpio_model.cpp
+  logger.cpp
+  stm32_swd_target.cpp
+  ../src/swd_min.cpp
+  ../src/stm32g0_prog.cpp
+)
+
+target_include_directories(read_flash_simulation PRIVATE
+  ${CMAKE_CURRENT_LIST_DIR}/arduino_compat
+  ${CMAKE_CURRENT_LIST_DIR}
+  ${CMAKE_CURRENT_LIST_DIR}/..
+  ${CMAKE_CURRENT_LIST_DIR}/../src
+)
+
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang|GNU")
+  target_compile_options(read_flash_simulation PRIVATE -Wall -Wextra -Wpedantic)
+endif()

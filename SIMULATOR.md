@@ -162,21 +162,23 @@ cmake --build sim/build
 Run one of the standalone sims (writes CSV into the repo root):
 
 ```bash
-./sim/build/reset_and_switch_to_swd_simulation
-./sim/build/read_simulation
-./sim/build/write_simulation
-./sim/build/read_then_write_simulation
-./sim/build/write_then_read_simulation
+  ./sim/build/reset_and_switch_to_swd_simulation
+  ./sim/build/read_simulation
+  ./sim/build/write_simulation
+  ./sim/build/read_then_write_simulation
+  ./sim/build/write_then_read_simulation
+  ./sim/build/read_flash_simulation
 ```
 
 View a CSV in the browser (generates `waveforms.html` and opens it):
 
 ```bash
-python3 viewer/view_log.py reset_and_switch_to_swd_simulation.csv
-python3 viewer/view_log.py read_simulation.csv
-python3 viewer/view_log.py write_simulation.csv
-python3 viewer/view_log.py read_then_write_simulation.csv
-python3 viewer/view_log.py write_then_read_simulation.csv
+  python3 viewer/view_log.py reset_and_switch_to_swd_simulation.csv
+  python3 viewer/view_log.py read_simulation.csv
+  python3 viewer/view_log.py write_simulation.csv
+  python3 viewer/view_log.py read_then_write_simulation.csv
+  python3 viewer/view_log.py write_then_read_simulation.csv
+  python3 viewer/view_log.py read_flash_simulation.csv
 ```
 
 Note: [`viewer/view_log.py`](viewer/view_log.py:1) writes an HTML file next to the CSV with the same basename, e.g. `read_simulation.csv` -> `read_simulation.html`.

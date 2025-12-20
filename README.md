@@ -129,9 +129,14 @@ In this edge-only model, the only legal SWDIO transitions are:
         Firmware Size: 9220 bytes
         Send 'p' to start programming...
         ```
-    -   Type **`p`** and press Enter.
-    -   The ESP32 will initialize SWD, erase the target, program the flash, and verify the content.
-    -   Look for **"SUCCESS! Target programmed."**
+    -   Use serial commands:
+        - `h` help
+        - `i` reset + read DP IDCODE
+        - `r` read first 8 bytes of target flash @ `0x08000000`
+        - `e` mass erase
+        - `w` write embedded firmware
+        - `v` verify embedded firmware
+        - `a` all (connect+halt, erase, write, verify)
 
 ## Updating the Firmware
 

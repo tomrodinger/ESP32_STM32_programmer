@@ -19,5 +19,14 @@ bool flash_program(uint32_t addr, const uint8_t *data, uint32_t len);
 // Verify + dump bytes read from flash. Returns true only if all bytes match.
 bool flash_verify_and_dump(uint32_t addr, const uint8_t *data, uint32_t len);
 
-} // namespace stm32g0_prog
+// Read arbitrary bytes from target memory via SWD/AHB-AP.
+// This is used for flash reads (e.g. addr=FLASH_BASE) but is generic.
+//
+// For the "read first 8 flash bytes" use case described in READ_FLASH.md:
+//   flash_read_bytes(0x08000000, out, 8, &flash_optr)
+//
+// If flash_optr_out is non-null, this routine will attempt a diagnostic read of:
+//   FLASH_OPTR at absolute address 0x40022020 (FLASH_R_BASE + 0x20), and store it.
+bool flash_read_bytes(uint32_t addr, uint8_t *out, uint32_t len, uint32_t *flash_optr_out = nullptr);
 
+} // namespace stm32g0_prog

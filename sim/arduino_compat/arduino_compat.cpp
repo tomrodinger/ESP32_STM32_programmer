@@ -12,6 +12,8 @@
 #include "../stm32_swd_target.h"
 #include "../sim_api.h"
 
+#include "../binary.h"
+
 namespace sim {
 
 struct Runtime {
@@ -34,7 +36,12 @@ struct Runtime {
   bool target_drove_swdio_seen = false;
   bool target_voltage_logged_seen = false;
 
-  Runtime() : logger(std::make_unique<CsvLogger>("signals.csv")) { target.reset(); }
+  Runtime() : logger(std::make_unique<CsvLogger>("signals.csv")) {
+    target.reset();
+    // Default simulated flash contents should match the repo's embedded firmware blob.
+    // This enables read-flash simulations without requiring a separate programming step.
+    target.load_flash_image(firmware_bin, firmware_bin_len);
+  }
 };
 
 Runtime &rt() {
