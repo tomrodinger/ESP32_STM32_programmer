@@ -14,6 +14,9 @@ bool connect_and_halt();
 
 // Flash operations
 bool flash_mass_erase();
+// Mass erase while NRST is held LOW - for recovering chips where firmware disables SWD.
+// See MASS_ERASE.md for implementation details.
+bool flash_mass_erase_under_reset();
 bool flash_program(uint32_t addr, const uint8_t *data, uint32_t len);
 
 // Verify + dump bytes read from flash. Returns true only if all bytes match.
@@ -28,5 +31,10 @@ bool flash_verify_and_dump(uint32_t addr, const uint8_t *data, uint32_t len);
 // If flash_optr_out is non-null, this routine will attempt a diagnostic read of:
 //   FLASH_OPTR at absolute address 0x40022020 (FLASH_R_BASE + 0x20), and store it.
 bool flash_read_bytes(uint32_t addr, uint8_t *out, uint32_t len, uint32_t *flash_optr_out = nullptr);
+
+// Read the Program Counter register to verify core is running/accessible.
+// Reads PC multiple times to show it's changing (proves core is executing).
+// Returns true if successful.
+bool read_program_counter();
 
 } // namespace stm32g0_prog

@@ -246,7 +246,7 @@ When RDP is Level 0, the first 8 bytes at 0x0800_0000 are the start of the vecto
 
 So if you read values resembling `0x2000....` then `0x0800....`, your read path is very likely correct.
 
-## Cross-check with STM32G0 flash SR/CR bits (why reading is “simple”)
+## Cross-check with STM32G0 flash SR/CR bits (why reading is "simple")
 
 Reading flash (unlike erase/program) does *not* require unlocking flash control registers.
 
@@ -255,3 +255,35 @@ The flash control/status definitions that matter for erase/program are still use
 - `FLASH_SR_RDERR` exists (bit 14) ([`docs/stm32g031xx.h`](docs/stm32g031xx.h:2468)) and can indicate issues related to PCROP reads on devices that support it.
 
 We do **not** currently read/clear these flags in the SWD read path; we only mention them here so you know where to look when diagnosing access issues.
+
+## STM32G0-specific: NRST release resets DP/AP state
+
+**Critical finding (from Perplexity research, Dec 2024):**
+
+On STM32G0, NRST is a *system reset* that resets **all registers in the VCORE domain**, including the SWD/debug logic. This is different from some other ARM Cortex-M implementations where the debug port may survive system reset.
+
+This means:
+1. DP operations work while NRST is held low (confirmed by IDCODE reads)
+2. When NRST is released, the DP state is cleared
+3. A full SWD line reset + JTAG-to-SWD sequence is needed after NRST release
+
+The code in [`swd_min::connect_under_reset_and_init()`](src/swd_min.cpp:485) implements an aggressive reconnect sequence after NRST release.
+
+## Troubleshooting ACK=7 after NRST release
+
+If you see ACK=7 (all ACK bits high = invalid/no response) on all operations after NRST release, the problem is likely one of:
+
+1. **User firmware disables SWD pins extremely quickly** - Some firmware reconfigures PA13/PA14 (SWDIO/SWCLK) as GPIO within microseconds of reset. The only solution is to add a debug delay loop early in `Reset_Handler` or use a debug-strap GPIO.
+
+2. **Hardware issue with NRST** - Verify with scope/meter that NRST actually rises cleanly to VDD when released. Check for shorts or pull-downs on the NRST line.
+
+3. **Option bytes have SWD disabled** - If the device's option bytes disable debugging, SWD will not respond after reset. This requires "connect under reset" with power-cycling to recover.
+
+4. **SWD pins have hardware conflicts** - Check that nothing else is driving PA13/PA14 (level shifters, other MCUs, strong pull-downs, etc.).
+
+### Diagnostic steps:
+
+1. **Try on a known-good board** (fresh chip or Nucleo) to verify the procedure works
+2. **Measure NRST with scope** during the attach sequence
+3. **Try without NRST control** - On STM32G0, NRST is not strictly required for SWD if the firmware cooperates
+4. **If you can briefly connect**, immediately read option bytes and check debug settings

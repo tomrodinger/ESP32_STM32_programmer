@@ -28,12 +28,23 @@ static constexpr uint8_t ACK_FAULT = 0b100;
 void begin(const Pins &pins);
 
 // Enable verbose SWD diagnostics printed to Serial (best for bench debugging).
-// Default: false.
+// Default: true.
 void set_verbose(bool enabled);
 bool verbose_enabled();
 
 // Drives a reset + SWD line reset + JTAG->SWD sequence.
 void reset_and_switch_to_swd();
+
+// Perform SWD line reset + JTAG-to-SWD WITHOUT touching NRST.
+// Use this after releasing NRST to re-establish SWD link on STM32G0,
+// because system reset clears the DP/AP state.
+void swd_line_reset();
+
+// "Connect under reset" sequence: release NRST and aggressively try to
+// re-establish SWD communication before user firmware can disable SWD pins.
+// Call this AFTER reset_and_switch_to_swd() and dp_init_and_power_up() succeed
+// with NRST held low.
+bool connect_under_reset_and_init();
 
 // Convenience helper used for the bench-proven “attach + IDCODE read” sequence.
 // This is the only place we print the attach banner lines.
@@ -45,6 +56,10 @@ bool read_idcode(uint32_t *idcode_out, uint8_t *ack_out = nullptr);
 
 // Reset pin control.
 void set_nrst(bool asserted);
+
+// Returns the current output level on the NRST pin (true = HIGH, false = LOW).
+// NOTE: NRST is driven by the ESP32, so this reflects what we are driving.
+bool nrst_is_high();
 
 // --- DP/AP access (sufficient for AHB-AP memory access) ---
 
@@ -77,6 +92,11 @@ bool ap_write_reg(uint8_t addr, uint32_t val, uint8_t *ack_out = nullptr);
 // AHB-AP memory access helpers (32-bit).
 bool mem_write32(uint32_t addr, uint32_t val);
 bool mem_read32(uint32_t addr, uint32_t *val_out);
+
+// Human-friendly variants: print one condensed English line per DP/AP read/write
+// (purpose + register + address + data + ACK status).
+bool mem_write32_verbose(const char *purpose, uint32_t addr, uint32_t val);
+bool mem_read32_verbose(const char *purpose, uint32_t addr, uint32_t *val_out);
 
 // Helper for printing ACK values.
 // NOTE: We return a plain C string so it is safe to use with Serial.printf("%s").

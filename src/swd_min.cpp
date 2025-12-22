@@ -3,14 +3,22 @@
 namespace swd_min {
 
 static Pins g_pins;
-static bool g_verbose = false;
+// User-facing verbose mode (toggled by 'd').
+static bool g_verbose = true;
+
+// Raw low-level packet tracing is intentionally OFF (too noisy for humans).
+// If you need packet-level troubleshooting later, add a command to toggle this.
+static constexpr bool k_verbose_raw = false;
+static bool g_nrst_last_high = true;
 
 void set_verbose(bool enabled) { g_verbose = enabled; }
 bool verbose_enabled() { return g_verbose; }
 
 #ifndef SWD_HALF_PERIOD_US
-// Conservative timing for jumper wires + Arduino digitalWrite/digitalRead.
-#define SWD_HALF_PERIOD_US 5
+// Fast timing for tight window after NRST release.
+// Original was 5µs (conservative), reduced to 1µs to fit more operations
+// before target firmware can disable SWD pins.
+#define SWD_HALF_PERIOD_US 1
 #endif
 
 static inline void swd_delay() { delayMicroseconds(SWD_HALF_PERIOD_US); }
@@ -104,9 +112,88 @@ static inline void line_idle_cycles_low(uint32_t cycles);
 // (Keep unused to avoid warnings on some builds.)
 // static inline void swd_line_idle_cycles(uint32_t cycles) { line_idle_cycles(cycles); }
 
-static bool dp_write(uint8_t addr, uint32_t val, uint8_t *ack_out);
-static bool ap_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out);
-static bool ap_write(uint8_t addr, uint32_t val, uint8_t *ack_out);
+static bool dp_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out, bool log_enable);
+static bool dp_write(uint8_t addr, uint32_t val, uint8_t *ack_out, bool log_enable);
+static bool ap_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out, bool log_enable);
+static bool ap_write(uint8_t addr, uint32_t val, uint8_t *ack_out, bool log_enable);
+
+static const char *dp_reg_name_read(uint8_t addr) {
+  switch (addr) {
+    case DP_ADDR_IDCODE: return "IDCODE";
+    case DP_ADDR_CTRLSTAT: return "CTRL/STAT";
+    case DP_ADDR_SELECT: return "SELECT";
+    case DP_ADDR_RDBUFF: return "RDBUFF";
+    default: return "(unknown)";
+  }
+}
+
+static const char *dp_reg_name_write(uint8_t addr) {
+  // Note: IDCODE and ABORT share the same address (0x00).
+  // For writes, address 0x00 is always ABORT.
+  if (addr == DP_ADDR_ABORT) return "ABORT";
+  switch (addr) {
+    case DP_ADDR_CTRLSTAT: return "CTRL/STAT";
+    case DP_ADDR_SELECT: return "SELECT";
+    default: return "(unknown)";
+  }
+}
+
+static const char *ap_reg_name(uint8_t addr) {
+  switch (addr) {
+    case AP_ADDR_CSW: return "CSW";
+    case AP_ADDR_TAR: return "TAR";
+    case AP_ADDR_DRW: return "DRW";
+    case AP_ADDR_IDR: return "IDR";
+    default: return "(unknown)";
+  }
+}
+
+static const char *dp_read_purpose(uint8_t addr) {
+  switch (addr) {
+    case DP_ADDR_IDCODE: return "Identify the target debug port";
+    case DP_ADDR_CTRLSTAT: return "Check debug/system power-up handshake status";
+    case DP_ADDR_SELECT: return "Confirm which AP/bank is selected";
+    case DP_ADDR_RDBUFF: return "Fetch posted-read result (from previous AP read)";
+    default: return "Read a debug-port register";
+  }
+}
+
+static const char *dp_write_purpose(uint8_t addr, uint32_t val) {
+  if (addr == DP_ADDR_ABORT) {
+    if ((val & 0x1Eu) == 0x1Eu) return "Clear sticky error flags";
+    return "Write ABORT to clear/abort debug-port errors";
+  }
+  if (addr == DP_ADDR_CTRLSTAT) {
+    if ((val & 0x50000000u) == 0x50000000u) return "Request debug+system power-up";
+    return "Write power/control bits";
+  }
+  if (addr == DP_ADDR_SELECT) {
+    return "Select which Access Port (AP) and register bank to use";
+  }
+  return "Write a debug-port register";
+}
+
+static const char *ap_write_purpose(uint8_t addr, uint32_t val) {
+  (void)val;
+  switch (addr) {
+    case AP_ADDR_CSW: return "Configure AHB-AP transfer settings";
+    case AP_ADDR_TAR: return "Set the target memory address (TAR)";
+    case AP_ADDR_DRW: return "Write a 32-bit word to target memory via AHB-AP";
+    default: return "Write an AP register";
+  }
+}
+
+static const char *ap_read_purpose(uint8_t addr) {
+  switch (addr) {
+    case AP_ADDR_DRW:
+      return "Start a 32-bit memory read (posted; the true value will be read from DP RDBUFF)";
+    case AP_ADDR_IDR: return "Read AHB-AP identification register";
+    default: return "Read an AP register";
+  }
+}
+
+// NOTE: Intentionally no raw per-bit / per-packet prints. We only print condensed,
+// human-readable lines with: purpose + register + address + data + ACK.
 
 static inline void line_idle_cycles(uint32_t cycles) {
   // Bus idle: host drives SWDIO high.
@@ -166,12 +253,10 @@ static inline uint8_t make_request(uint8_t apndp, uint8_t rnw, uint8_t addr) {
   return req;
 }
 
-static bool dp_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out) {
+static bool dp_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out, bool log_enable) {
   const uint8_t req = make_request(/*APnDP=*/0, /*RnW=*/1, addr);
 
-  if (g_verbose) {
-    Serial.printf("SWD: DP READ  req=0x%02X addr=0x%02X\n", (unsigned)req, (unsigned)addr);
-  }
+  (void)req; // request byte is not printed (not useful for humans)
 
   // Request phase (host drives)
   swdio_output();
@@ -204,7 +289,7 @@ static bool dp_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out) {
   ack |= read_bit() << 2;
   if (ack_out) *ack_out = ack;
 
-  if (g_verbose) {
+  if (k_verbose_raw) {
     Serial.printf("SWD DP READ  addr=0x%02X  ACK=%u (%s)\n", (unsigned)addr, (unsigned)ack,
                   ack_to_str(ack));
   }
@@ -237,7 +322,7 @@ static bool dp_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out) {
 
   // Parity check: SWD uses odd parity over the 32 data bits
   if (p_rx != parity_u32(v)) {
-    if (g_verbose) {
+    if (k_verbose_raw) {
       Serial.printf("SWD DP READ  addr=0x%02X  PARITY FAIL  p_rx=%u p_calc=%u data=0x%08lX\n", (unsigned)addr,
                     (unsigned)p_rx, (unsigned)parity_u32(v), (unsigned long)v);
     }
@@ -245,23 +330,24 @@ static bool dp_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out) {
     return false;
   }
 
-  if (g_verbose) {
+  if (k_verbose_raw) {
     Serial.printf("SWD DP READ  addr=0x%02X  data=0x%08lX  parity=%u\n", (unsigned)addr, (unsigned long)v,
                   (unsigned)p_rx);
   }
 
   if (val_out) *val_out = v;
+  if (g_verbose && log_enable) {
+    Serial.printf("%s (DP READ %s addr=0x%02X, data=0x%08lX, ACK=%u %s)\n", dp_read_purpose(addr),
+                  dp_reg_name_read(addr), (unsigned)addr, (unsigned long)v, (unsigned)ack, ack_to_str(ack));
+  }
   line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
   return true;
 }
 
-static bool dp_write(uint8_t addr, uint32_t val, uint8_t *ack_out) {
+static bool dp_write(uint8_t addr, uint32_t val, uint8_t *ack_out, bool log_enable) {
   const uint8_t req = make_request(/*APnDP=*/0, /*RnW=*/0, addr);
 
-  if (g_verbose) {
-    Serial.printf("SWD: DP WRITE req=0x%02X addr=0x%02X data=0x%08lX\n", (unsigned)req, (unsigned)addr,
-                  (unsigned long)val);
-  }
+  (void)req; // request byte is not printed (not useful for humans)
 
   // Request phase
   swdio_output();
@@ -287,7 +373,7 @@ static bool dp_write(uint8_t addr, uint32_t val, uint8_t *ack_out) {
   ack |= read_bit() << 2;
   if (ack_out) *ack_out = ack;
 
-  if (g_verbose) {
+  if (k_verbose_raw) {
     Serial.printf("SWD DP WRITE addr=0x%02X  ACK=%u (%s)  data=0x%08lX\n", (unsigned)addr, (unsigned)ack,
                   ack_to_str(ack), (unsigned long)val);
   }
@@ -312,18 +398,20 @@ static bool dp_write(uint8_t addr, uint32_t val, uint8_t *ack_out) {
   write_bit(parity_u32(val));
 
   // Post-transfer idle/flush (low)
+  if (g_verbose && log_enable) {
+    Serial.printf("%s (DP WRITE %s addr=0x%02X, data=0x%08lX, ACK=%u %s)\n", dp_write_purpose(addr, val),
+                  dp_reg_name_write(addr), (unsigned)addr, (unsigned long)val, (unsigned)ack, ack_to_str(ack));
+  }
   line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
   return true;
 }
 
-static bool ap_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out) {
+static bool ap_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out, bool log_enable) {
   // AP reads are posted; caller should read DP RDBUFF to get the value.
   // We'll perform AP read request, then DP RDBUFF read.
   const uint8_t req = make_request(/*APnDP=*/1, /*RnW=*/1, addr);
 
-  if (g_verbose) {
-    Serial.printf("SWD: AP READ  req=0x%02X addr=0x%02X\n", (unsigned)req, (unsigned)addr);
-  }
+  (void)req; // request byte is not printed (not useful for humans)
 
   swdio_output();
   swdio_write(1);
@@ -337,7 +425,7 @@ static bool ap_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out) {
   ack |= read_bit() << 2;
   if (ack_out) *ack_out = ack;
 
-  if (g_verbose) {
+  if (k_verbose_raw) {
     Serial.printf("SWD AP READ  addr=0x%02X  ACK=%u (%s)\n", (unsigned)addr, (unsigned)ack, ack_to_str(ack));
   }
 
@@ -367,7 +455,7 @@ static bool ap_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out) {
   swdio_write(0);
 
   if (p_rx != parity_u32(v)) {
-    if (g_verbose) {
+    if (k_verbose_raw) {
       Serial.printf("SWD AP READ  addr=0x%02X  PARITY FAIL  p_rx=%u p_calc=%u data=0x%08lX\n", (unsigned)addr,
                     (unsigned)p_rx, (unsigned)parity_u32(v), (unsigned long)v);
     }
@@ -375,7 +463,7 @@ static bool ap_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out) {
     return false;
   }
 
-  if (g_verbose) {
+  if (k_verbose_raw) {
     Serial.printf("SWD AP READ  addr=0x%02X  data(stale)=0x%08lX  parity=%u\n", (unsigned)addr, (unsigned long)v,
                   (unsigned)p_rx);
   }
@@ -383,17 +471,18 @@ static bool ap_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out) {
   // The value returned here is NOT the true AP register value (posted read semantics);
   // it is the stale read buffer. Caller should read DP RDBUFF.
   if (val_out) *val_out = v;
+  if (g_verbose && log_enable) {
+    Serial.printf("%s (AP READ %s addr=0x%02X, data(stale)=0x%08lX, ACK=%u %s)\n", ap_read_purpose(addr),
+                  ap_reg_name(addr), (unsigned)addr, (unsigned long)v, (unsigned)ack, ack_to_str(ack));
+  }
   line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
   return true;
 }
 
-static bool ap_write(uint8_t addr, uint32_t val, uint8_t *ack_out) {
+static bool ap_write(uint8_t addr, uint32_t val, uint8_t *ack_out, bool log_enable) {
   const uint8_t req = make_request(/*APnDP=*/1, /*RnW=*/0, addr);
 
-  if (g_verbose) {
-    Serial.printf("SWD: AP WRITE req=0x%02X addr=0x%02X data=0x%08lX\n", (unsigned)req, (unsigned)addr,
-                  (unsigned long)val);
-  }
+  (void)req; // request byte is not printed (not useful for humans)
 
   swdio_output();
   swdio_write(1);
@@ -407,7 +496,7 @@ static bool ap_write(uint8_t addr, uint32_t val, uint8_t *ack_out) {
   ack |= read_bit() << 2;
   if (ack_out) *ack_out = ack;
 
-  if (g_verbose) {
+  if (k_verbose_raw) {
     Serial.printf("SWD AP WRITE addr=0x%02X  ACK=%u (%s)\n", (unsigned)addr, (unsigned)ack, ack_to_str(ack));
   }
 
@@ -427,6 +516,10 @@ static bool ap_write(uint8_t addr, uint32_t val, uint8_t *ack_out) {
   write_bit(parity_u32(val));
 
   // Post-transfer idle/flush (low)
+  if (g_verbose && log_enable) {
+    Serial.printf("%s (AP WRITE %s addr=0x%02X, data=0x%08lX, ACK=%u %s)\n", ap_write_purpose(addr, val),
+                  ap_reg_name(addr), (unsigned)addr, (unsigned long)val, (unsigned)ack, ack_to_str(ack));
+  }
   line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
   return true;
 }
@@ -439,6 +532,7 @@ void begin(const Pins &pins) {
 
   pinMode(g_pins.nrst, OUTPUT);
   digitalWrite(g_pins.nrst, HIGH);
+  g_nrst_last_high = true;
 
   swdio_output();
   swdio_write(1);
@@ -446,13 +540,22 @@ void begin(const Pins &pins) {
 
 void set_nrst(bool asserted) {
   // asserted=true => drive NRST low
+  const bool next_high = asserted ? false : true;
+  if (next_high != g_nrst_last_high) {
+    Serial.printf("---------------------------------------- NRST %s\n", next_high ? "HIGH" : "LOW");
+    g_nrst_last_high = next_high;
+  }
   digitalWrite(g_pins.nrst, asserted ? LOW : HIGH);
+}
+
+bool nrst_is_high() {
+  return digitalRead(g_pins.nrst) == HIGH;
 }
 
 void reset_and_switch_to_swd() {
   // Hold target in reset during SWD attach. This matches ST-LINK/V2 behavior observed
   // on the bench (NRST held low across the early SWD connect + initial transactions).
-  digitalWrite(g_pins.nrst, LOW);
+  set_nrst(true);
   delay(20);
 
   // "Standard" SWD init: line reset -> JTAG-to-SWD -> line reset.
@@ -467,29 +570,106 @@ void reset_and_switch_to_swd() {
   // Intentionally do NOT release NRST here; keep it low through the IDCODE read.
 }
 
+void swd_line_reset() {
+  // Perform SWD line reset + JTAG-to-SWD sequence WITHOUT touching NRST.
+  // This is used to re-establish SWD communication after releasing NRST,
+  // because on STM32G0 the system reset (NRST release) clears the DP/AP state.
+  // See: Perplexity research on STM32G0 reset behavior.
+  if (g_verbose) {
+    Serial.println(
+        "Re-sync SWD physical layer (line reset, JTAG-to-SWD sequence, line reset; NRST is not changed)");
+  }
+  line_reset();
+  jtag_to_swd_sequence();
+  line_reset();
+
+  // Idle cycles to allow target to stabilize.
+  line_idle_cycles(16);
+}
+
+bool connect_under_reset_and_init() {
+  // "Connect under reset" sequence for targets that may disable SWD pins quickly.
+  // This keeps SWD activity going while releasing NRST, then aggressively tries
+  // to re-establish communication.
+  //
+  // Based on Perplexity research: "keep doing SWD transactions continuously,
+  // then release NRST while the debugger is already active, and keep clocking SWD."
+
+  if (g_verbose) {
+    Serial.println("Connect-under-reset: aggressively re-connect to SWD immediately after releasing NRST");
+  }
+
+  // NRST should already be LOW at this point (from reset_and_switch_to_swd)
+  // Release NRST while immediately starting SWD activity
+  if (g_verbose) {
+    Serial.println("Release reset and immediately re-sync SWD...");
+  }
+  set_nrst(false);
+
+  // Immediately try multiple reconnect attempts with minimal delay
+  for (int attempt = 0; attempt < 5; attempt++) {
+    if (g_verbose) {
+      Serial.printf("Reconnect attempt %d/5: line reset + JTAG-to-SWD + read DP IDCODE\n", attempt + 1);
+    }
+    // Quick line reset + JTAG-to-SWD
+    line_reset();
+    jtag_to_swd_sequence();
+    line_reset();
+    line_idle_cycles(8);
+
+    // Try IDCODE read - if it works, we're connected
+    uint32_t idcode = 0;
+    uint8_t ack = 0;
+    // Log this read in human format when verbose is enabled.
+    if (dp_read(DP_ADDR_IDCODE, &idcode, &ack, /*log_enable=*/g_verbose) && ack == ACK_OK) {
+      if (g_verbose) {
+        Serial.printf("Re-connect success on attempt %d (DP IDCODE=0x%08lX)\n", attempt + 1, (unsigned long)idcode);
+      }
+      // Now do full DP init
+      return dp_init_and_power_up();
+    }
+
+    if (g_verbose && attempt < 3) {
+      Serial.printf("Re-connect attempt %d failed (ACK=%u %s); retrying...\n", attempt + 1, (unsigned)ack,
+                    ack_to_str(ack));
+    }
+
+    // Very short delay before retry
+    delayMicroseconds(100);
+  }
+
+  if (g_verbose) {
+    Serial.println("Re-connect failed: no valid SWD response after releasing NRST");
+  }
+  return false;
+}
+
 bool attach_and_read_idcode(uint32_t *idcode_out, uint8_t *ack_out) {
   // The two banner lines requested should only appear as part of this convenience helper.
   if (g_verbose) {
-    Serial.println("SWD: reset_and_switch_to_swd(): assert NRST, line reset, JTAG->SWD, line reset");
+    Serial.println("Assert reset and switch debug port to SWD mode (line reset + JTAG-to-SWD + line reset)");
   }
   reset_and_switch_to_swd();
   if (g_verbose) {
-    Serial.println("SWD: reset_and_switch_to_swd(): done (NRST still asserted)");
+    Serial.println("SWD mode selected; NRST is still asserted (LOW)");
   }
   return read_idcode(idcode_out, ack_out);
 }
 
 bool read_idcode(uint32_t *idcode_out, uint8_t *ack_out) {
   // DP IDCODE is at address 0x00.
-  return dp_read(/*addr=*/0x00, idcode_out, ack_out);
+  // We treat this as a low-level primitive; callers decide whether to log.
+  return dp_read(/*addr=*/0x00, idcode_out, ack_out, /*log_enable=*/false);
 }
 
 bool dp_read_reg(uint8_t addr, uint32_t *val_out, uint8_t *ack_out) {
-  return dp_read(addr, val_out, ack_out);
+  // Low-level primitive; callers decide whether to log.
+  return dp_read(addr, val_out, ack_out, /*log_enable=*/false);
 }
 
 bool dp_write_reg(uint8_t addr, uint32_t val, uint8_t *ack_out) {
-  return dp_write(addr, val, ack_out);
+  // Low-level primitive; callers decide whether to log.
+  return dp_write(addr, val, ack_out, /*log_enable=*/false);
 }
 
 bool dp_init_and_power_up() {
@@ -500,7 +680,7 @@ bool dp_init_and_power_up() {
   // - Configure lane (optional, ignored)
 
   if (g_verbose) {
-    Serial.println("SWD: dp_init_and_power_up() begin");
+    Serial.println("DP init: clear errors and request debug/system power-up");
   }
 
   // Bench observation: the first DP write after attach can fail unless we do a DP read first.
@@ -508,30 +688,24 @@ bool dp_init_and_power_up() {
   {
     uint8_t ack = 0;
     uint32_t idcode = 0;
-    (void)read_idcode(&idcode, &ack);
-    if (g_verbose) {
-      Serial.printf("SWD: dp_init_and_power_up() pre-read IDCODE ack=%u (%s) idcode=0x%08lX\n", (unsigned)ack,
-                    ack_to_str(ack), (unsigned long)idcode);
-    }
+    (void)dp_read(DP_ADDR_IDCODE, &idcode, &ack, /*log_enable=*/g_verbose);
   }
 
   // Clear sticky errors: write ABORT with STKCMPCLR/STKERRCLR/WDERRCLR/ORUNERRCLR
   // (bits 0..4: ORUNERRCLR=4, WDERRCLR=3, STKERRCLR=2, STKCMPCLR=1)
   {
     uint8_t ack = 0;
-    (void)dp_write_reg(DP_ADDR_ABORT, (1u << 4) | (1u << 3) | (1u << 2) | (1u << 1), &ack);
-    if (g_verbose) {
-      Serial.printf("SWD: ABORT clear ACK=%u (%s)\n", (unsigned)ack, ack_to_str(ack));
-    }
+    (void)dp_write(DP_ADDR_ABORT, (1u << 4) | (1u << 3) | (1u << 2) | (1u << 1), &ack, /*log_enable=*/g_verbose);
   }
 
   // Power up request: CSYSPWRUPREQ (bit30) + CDBGPWRUPREQ (bit28)
   const uint32_t req = (1u << 30) | (1u << 28);
   {
     uint8_t ack = 0;
-    if (!dp_write_reg(DP_ADDR_CTRLSTAT, req, &ack)) {
+    if (!dp_write(DP_ADDR_CTRLSTAT, req, &ack, /*log_enable=*/g_verbose)) {
       if (g_verbose) {
-        Serial.printf("SWD: CTRL/STAT write failed ACK=%u (%s)\n", (unsigned)ack, ack_to_str(ack));
+        Serial.printf("DP power-up request failed (DP WRITE CTRL/STAT addr=0x%02X, data=0x%08lX, ACK=%u %s)\n",
+                      (unsigned)DP_ADDR_CTRLSTAT, (unsigned long)req, (unsigned)ack, ack_to_str(ack));
       }
       return false;
     }
@@ -543,9 +717,11 @@ bool dp_init_and_power_up() {
   for (int i = 0; i < 200; i++) {
     uint32_t cs = 0;
     uint8_t ack = 0;
-    if (!dp_read_reg(DP_ADDR_CTRLSTAT, &cs, &ack)) {
+    if (!dp_read(DP_ADDR_CTRLSTAT, &cs, &ack, /*log_enable=*/false)) {
       if (g_verbose && i < 10) {
-        Serial.printf("SWD: CTRL/STAT read failed (poll %d) ACK=%u (%s)\n", i, (unsigned)ack, ack_to_str(ack));
+        Serial.printf(
+            "Poll CTRL/STAT failed (poll %d: DP READ CTRL/STAT addr=0x%02X, ACK=%u %s)\n", i,
+            (unsigned)DP_ADDR_CTRLSTAT, (unsigned)ack, ack_to_str(ack));
       }
       continue;
     }
@@ -555,8 +731,10 @@ bool dp_init_and_power_up() {
     if (g_verbose) {
       const bool changed = (!have_last) || (cs != last_cs);
       if (i < 10 || changed) {
-        Serial.printf("SWD: CTRL/STAT poll %d  cs=0x%08lX  sys_ack=%u dbg_ack=%u\n", i, (unsigned long)cs,
-                      (unsigned)sys_ack, (unsigned)dbg_ack);
+        Serial.printf(
+            "Waiting for power-up ACKs (poll %d: DP READ CTRL/STAT addr=0x%02X, data=0x%08lX, ACK=%u %s, sys_ack=%u, dbg_ack=%u)\n",
+            i, (unsigned)DP_ADDR_CTRLSTAT, (unsigned long)cs, (unsigned)ack, ack_to_str(ack), (unsigned)sys_ack,
+            (unsigned)dbg_ack);
       }
       last_cs = cs;
       have_last = true;
@@ -566,7 +744,7 @@ bool dp_init_and_power_up() {
     delay(1);
   }
   if (g_verbose) {
-    Serial.println("SWD: dp_init_and_power_up() timeout waiting for ACK bits");
+    Serial.println("DP init timeout: never observed both SYS+DBG power-up ACK bits");
   }
   return false;
 }
@@ -575,52 +753,45 @@ bool ap_select(uint8_t apsel, uint8_t apbanksel) {
   // SELECT: [31:24]=APSEL, [7:4]=APBANKSEL
   const uint32_t sel = ((uint32_t)apsel << 24) | ((uint32_t)(apbanksel & 0xFu) << 4);
 
-  if (g_verbose) {
-    Serial.printf("SWD: DP SELECT write apsel=%u apbanksel=%u sel=0x%08lX\n", (unsigned)apsel, (unsigned)apbanksel,
-                  (unsigned long)sel);
-  }
-  return dp_write_reg(DP_ADDR_SELECT, sel, nullptr);
+  // Log in the requested one-line English format when verbose is enabled.
+  return dp_write(DP_ADDR_SELECT, sel, nullptr, /*log_enable=*/g_verbose);
 }
 
 bool ap_read_reg(uint8_t addr, uint32_t *val_out, uint8_t *ack_out) {
   uint32_t dummy = 0;
   uint8_t ack0 = 0;
-  if (!ap_read(addr, &dummy, &ack0)) {
+  if (!ap_read(addr, &dummy, &ack0, /*log_enable=*/false)) {
     if (ack_out) *ack_out = ack0;
     return false;
   }
   // True value in RDBUFF
   uint8_t ack1 = 0;
   uint32_t v = 0;
-  if (!dp_read_reg(DP_ADDR_RDBUFF, &v, &ack1)) {
+  if (!dp_read(DP_ADDR_RDBUFF, &v, &ack1, /*log_enable=*/false)) {
     if (ack_out) *ack_out = ack1;
     return false;
   }
   if (ack_out) *ack_out = ACK_OK;
   if (val_out) *val_out = v;
 
-  if (g_verbose) {
-    Serial.printf("SWD: AP READ  addr=0x%02X  RDBUFF=0x%08lX\n", (unsigned)addr, (unsigned long)v);
-  }
+  // Intentionally do not print here; higher-level routines should log in human format.
   return true;
 }
 
 bool ap_write_reg(uint8_t addr, uint32_t val, uint8_t *ack_out) {
   uint8_t ack = 0;
-  const bool ok = ap_write(addr, val, &ack);
+  const bool ok = ap_write(addr, val, &ack, /*log_enable=*/false);
   if (ack_out) *ack_out = ack;
   return ok;
 }
 
 bool mem_write32(uint32_t addr, uint32_t val) {
-  // AHB-AP CSW: size=32-bit, AddrInc=single, DBGSTAT disabled.
-  // CSW bits: [2:0] SIZE (0b010 for 32-bit), [5:4] AddrInc (0b01 for single)
-  const uint32_t CSW_32_INC = (0b010u << 0) | (0b01u << 4);
+  // AHB-AP CSW value used throughout this repo (see MASS_ERASE.md / PC_READ.md).
+  // Low bits still represent: SIZE=32-bit, AddrInc=single.
+  // Extra upper bits are used by some probes/targets for robust access.
+  const uint32_t CSW_32_INC = 0x23000012u;
 
-  if (g_verbose) {
-    Serial.printf("MEM WRITE32: addr=0x%08lX data=0x%08lX CSW=0x%08lX\n", (unsigned long)addr, (unsigned long)val,
-                  (unsigned long)CSW_32_INC);
-  }
+  // Intentionally do not print raw memory ops here; callers should log in human format.
   if (!ap_select(/*apsel=*/0, /*apbanksel=*/0)) return false;
   if (!ap_write_reg(AP_ADDR_CSW, CSW_32_INC, nullptr)) return false;
   if (!ap_write_reg(AP_ADDR_TAR, addr, nullptr)) return false;
@@ -629,11 +800,9 @@ bool mem_write32(uint32_t addr, uint32_t val) {
 }
 
 bool mem_read32(uint32_t addr, uint32_t *val_out) {
-  const uint32_t CSW_32_INC = (0b010u << 0) | (0b01u << 4);
+  const uint32_t CSW_32_INC = 0x23000012u;
 
-  if (g_verbose) {
-    Serial.printf("MEM READ32:  addr=0x%08lX CSW=0x%08lX\n", (unsigned long)addr, (unsigned long)CSW_32_INC);
-  }
+  // Intentionally do not print raw memory ops here; callers should log in human format.
   if (!ap_select(/*apsel=*/0, /*apbanksel=*/0)) return false;
   if (!ap_write_reg(AP_ADDR_CSW, CSW_32_INC, nullptr)) return false;
   if (!ap_write_reg(AP_ADDR_TAR, addr, nullptr)) return false;
@@ -641,10 +810,77 @@ bool mem_read32(uint32_t addr, uint32_t *val_out) {
   uint32_t dummy = 0;
   if (!ap_read_reg(AP_ADDR_DRW, &dummy, nullptr)) return false;
   if (val_out) *val_out = dummy;
+  return true;
+}
 
+bool mem_write32_verbose(const char *purpose, uint32_t addr, uint32_t val) {
+  // AHB-AP CSW value used throughout this repo (see MASS_ERASE.md / PC_READ.md).
+  const uint32_t CSW_32_INC = 0x23000012u;
+
+  uint8_t ack = 0;
+  if (!ap_select(/*apsel=*/0, /*apbanksel=*/0)) return false;
+
+  // Log the underlying AP transactions as one-line English messages.
+  const char *p = (purpose && purpose[0]) ? purpose : "Memory write";
+
+  if (!ap_write(AP_ADDR_CSW, CSW_32_INC, &ack, /*log_enable=*/false)) return false;
   if (g_verbose) {
-    Serial.printf("MEM READ32:  addr=0x%08lX -> 0x%08lX\n", (unsigned long)addr, (unsigned long)dummy);
+    Serial.printf("%s: Configure AHB-AP for 32-bit transfers (AP WRITE CSW addr=0x%02X, data=0x%08lX, ACK=%u %s)\n",
+                  p, (unsigned)AP_ADDR_CSW, (unsigned long)CSW_32_INC, (unsigned)ack, ack_to_str(ack));
   }
+
+  if (!ap_write(AP_ADDR_TAR, addr, &ack, /*log_enable=*/false)) return false;
+  if (g_verbose) {
+    Serial.printf("%s: Set target address (AP WRITE TAR addr=0x%02X, data=0x%08lX, ACK=%u %s)\n", p,
+                  (unsigned)AP_ADDR_TAR, (unsigned long)addr, (unsigned)ack, ack_to_str(ack));
+  }
+
+  if (!ap_write(AP_ADDR_DRW, val, &ack, /*log_enable=*/false)) return false;
+  if (g_verbose) {
+    Serial.printf("%s: Write 32-bit value to target memory (AP WRITE DRW addr=0x%02X, data=0x%08lX, ACK=%u %s)\n", p,
+                  (unsigned)AP_ADDR_DRW, (unsigned long)val, (unsigned)ack, ack_to_str(ack));
+  }
+  return true;
+}
+
+bool mem_read32_verbose(const char *purpose, uint32_t addr, uint32_t *val_out) {
+  const uint32_t CSW_32_INC = 0x23000012u;
+
+  uint8_t ack = 0;
+  if (!ap_select(/*apsel=*/0, /*apbanksel=*/0)) return false;
+
+  const char *p = (purpose && purpose[0]) ? purpose : "Memory read";
+
+  if (!ap_write(AP_ADDR_CSW, CSW_32_INC, &ack, /*log_enable=*/false)) return false;
+  if (g_verbose) {
+    Serial.printf("%s: Configure AHB-AP for 32-bit transfers (AP WRITE CSW addr=0x%02X, data=0x%08lX, ACK=%u %s)\n",
+                  p, (unsigned)AP_ADDR_CSW, (unsigned long)CSW_32_INC, (unsigned)ack, ack_to_str(ack));
+  }
+
+  if (!ap_write(AP_ADDR_TAR, addr, &ack, /*log_enable=*/false)) return false;
+  if (g_verbose) {
+    Serial.printf("%s: Set target address (AP WRITE TAR addr=0x%02X, data=0x%08lX, ACK=%u %s)\n", p,
+                  (unsigned)AP_ADDR_TAR, (unsigned long)addr, (unsigned)ack, ack_to_str(ack));
+  }
+
+  // Start the posted read from DRW.
+  uint32_t stale = 0;
+  if (!ap_read(AP_ADDR_DRW, &stale, &ack, /*log_enable=*/false)) return false;
+  if (g_verbose) {
+    Serial.printf(
+        "%s: Start a posted memory read (AP READ DRW addr=0x%02X, data(stale)=0x%08lX, ACK=%u %s)\n", p,
+        (unsigned)AP_ADDR_DRW, (unsigned long)stale, (unsigned)ack, ack_to_str(ack));
+  }
+
+  // Fetch the true value via DP.RDBUFF.
+  uint32_t v = 0;
+  if (!dp_read(DP_ADDR_RDBUFF, &v, &ack, /*log_enable=*/false)) return false;
+  if (g_verbose) {
+    Serial.printf("%s: Fetch posted-read result (DP READ RDBUFF addr=0x%02X, data=0x%08lX, ACK=%u %s)\n", p,
+                  (unsigned)DP_ADDR_RDBUFF, (unsigned long)v, (unsigned)ack, ack_to_str(ack));
+  }
+
+  if (val_out) *val_out = v;
   return true;
 }
 

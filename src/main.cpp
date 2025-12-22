@@ -6,6 +6,10 @@
 
 static const swd_min::Pins PINS(35, 36, 37);
 
+static void print_user_pressed_banner(char c) {
+  Serial.printf("=== User pressed %c ========================\n", c);
+}
+
 static void print_help() {
   Serial.println("Commands:");
   Serial.println("  h = help");
@@ -14,8 +18,10 @@ static void print_help() {
   Serial.println("  d = toggle SWD verbose diagnostics");
   Serial.println("  b = DP ABORT write test (write under NRST low, then under NRST high)");
   Serial.println("  c = DP CTRL/STAT single-write test (DP[0x04]=0x50000000)");
+  Serial.println("  p = read Program Counter (PC) register (tests core register access)");
   Serial.println("  r = read first 8 bytes of target flash @ 0x08000000");
   Serial.println("  e = erase entire flash (mass erase)");
+  Serial.println("  m = MASS ERASE UNDER RESET (for chips with SWD disabled by firmware)");
   Serial.println("  w = write firmware to flash");
   Serial.println("  v = verify firmware in flash (dumps bytes read + mismatch count)");
   Serial.println("  a = all: connect+halt, erase, write, verify");
@@ -67,6 +73,13 @@ static bool cmd_verify() {
 
 static bool cmd_read_flash_first_8() {
   Serial.println("Reading first 8 bytes of target flash via SWD...");
+
+  // Make this command self-contained: it should work on a fresh/unprogrammed chip
+  // without requiring the user to run 'i' first.
+  if (!cmd_connect()) {
+    Serial.println("Read FAIL (could not connect + halt)");
+    return false;
+  }
 
   uint8_t buf[8] = {0};
   uint32_t optr = 0;
@@ -183,6 +196,9 @@ void setup() {
 
   swd_min::begin(PINS);
 
+  Serial.printf("SWD verbose: %s (default)\n", swd_min::verbose_enabled() ? "ON" : "OFF");
+  Serial.printf("Initial NRST state (driven by ESP32): %s\n", swd_min::nrst_is_high() ? "HIGH" : "LOW");
+
   print_help();
   Serial.println();
 
@@ -197,6 +213,13 @@ void loop() {
   }
 
   const char c = (char)Serial.read();
+
+  // Ignore whitespace/newlines from terminal.
+  if (c == '\n' || c == '\r' || c == ' ') {
+    return;
+  }
+
+  print_user_pressed_banner(c);
 
   switch (c) {
     case 'h':
@@ -224,12 +247,28 @@ void loop() {
       cmd_ap_csw_write_readback_test();
       break;
 
+    case 'p':
+      Serial.println("Reading Program Counter...");
+      {
+        const bool ok = stm32g0_prog::read_program_counter();
+        Serial.println(ok ? "PC read: SUCCESS" : "PC read: FAILED");
+      }
+      break;
+
     case 'r':
       cmd_read_flash_first_8();
       break;
 
     case 'e':
       cmd_erase();
+      break;
+
+    case 'm':
+      Serial.println("Mass erase under reset (NRST held LOW throughout)...");
+      {
+        const bool ok = stm32g0_prog::flash_mass_erase_under_reset();
+        Serial.println(ok ? "Mass erase under reset: OK" : "Mass erase under reset: FAIL");
+      }
       break;
 
     case 'w':
@@ -249,10 +288,7 @@ void loop() {
       break;
 
     default:
-      // Ignore whitespace/newlines from terminal.
-      if (c != '\n' && c != '\r' && c != ' ') {
-        Serial.printf("Unknown command '%c' (0x%02X). Press 'h' for help.\n", c, (unsigned)c);
-      }
+      Serial.printf("Unknown command '%c' (0x%02X). Press 'h' for help.\n", c, (unsigned)c);
       break;
   }
 }

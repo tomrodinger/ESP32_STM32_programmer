@@ -122,21 +122,21 @@ In this edge-only model, the only legal SWDIO transitions are:
      -   Upload to ESP32-S3: `pio run -t upload`
   3.  **Run**:
      -   Open the Serial Monitor: `pio device monitor` (baud rate 115200).
-    -   Reset the ESP32-S3.
-    -   You should see:
+     -   Reset the ESP32-S3.
+     -   You should see:
         ```
         ESP32-S3 STM32G0 Programmer
         Firmware Size: 9220 bytes
         Send 'p' to start programming...
         ```
-     -   Use serial commands:
-         - `h` help
-         - `i` reset + read DP IDCODE
-         - `d` toggle SWD verbose diagnostics (prints DP/AP/memory access details)
-         - `t` SWD smoke test (attempts DP power-up handshake + AHB-AP IDR read; may fail on current hardware)
-         - `c` DP CTRL/STAT single-write test (writes DP[0x04]=0x50000000; requires `i` first)
-         - `b` DP ABORT write test (writes DP[0x00]=0x1E under NRST low then high)
-         - `r` read first 8 bytes of target flash @ `0x08000000`
+      -   Use serial commands:
+          - `h` help
+          - `i` reset + read DP IDCODE
+          - `d` toggle SWD verbose diagnostics (prints DP/AP/memory access details)
+          - `t` SWD smoke test (attempts DP power-up handshake + AHB-AP IDR read; may fail on current hardware)
+          - `c` DP CTRL/STAT single-write test (writes DP[0x04]=0x50000000; requires `i` first)
+          - `b` DP ABORT write test (writes DP[0x00]=0x1E under NRST low then high)
+          - `r` read first 8 bytes of target flash @ `0x08000000`
          - `e` mass erase
          - `w` write embedded firmware
          - `v` verify embedded firmware
@@ -147,7 +147,15 @@ In this edge-only model, the only legal SWDIO transitions are:
 - A DP **IDCODE read** appears to be required before subsequent DP writes will ACK reliably. This is why the workflow is typically:
   1. Run `i`
   2. Run other commands (`c`, `t`, `r`, etc.)
-- `r` (flash read) is still failing on current hardware; the SWD attach/no-attach behavior and verbose logging have been improved to aid scope-based debugging.
+
+## Debug output behavior
+
+- **SWD verbose is ON by default** at boot. Toggle it with `d`.
+- Every non-whitespace keypress prints a banner like:
+  - `=== User pressed r ========================`
+- Whenever the firmware changes NRST state it prints a clear line like:
+  - `---------------------------------------- NRST HIGH`
+- The initial driven NRST state is printed at boot.
 
 ## Updating the Firmware
 
@@ -159,4 +167,27 @@ To change the firmware being flashed to the STM32:
     ```bash
     python3 convert_bin.py
     ```
-4.  Rebuild and upload the ESP32 firmware.
+  4.  Rebuild and upload the ESP32 firmware.
+
+## Automated build/upload + command runner (recommended)
+
+For faster iteration, use the helper script:
+
+1. Create and activate a local Python venv:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r tools/requirements.txt
+```
+
+2. Build + upload + run serial commands:
+
+```bash
+python3 tools/esp32_runner.py -i -r
+```
+
+Notes:
+
+- Use `--port /dev/tty.usbmodemXXXX` if auto-detection chooses the wrong port.
+- The script prints the device output and exits.
