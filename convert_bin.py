@@ -1,6 +1,6 @@
 import os
 
-input_file = "bootloader_M17_hw1.5_scc3_1764326641.bin"
+input_file = "bootloader_M17_hw1.5_scc3_1766404965.bin"
 output_file = "src/binary.h"
 
 if not os.path.exists(input_file):

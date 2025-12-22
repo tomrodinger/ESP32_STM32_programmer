@@ -20,12 +20,32 @@ This repo implements a **timing-based connect-under-reset recovery flow**:
 
 1. **Assert NRST LOW** (hold target in reset)
 2. **Initialize Debug Port** via SWD (DP init + power-up)
-3. **Pre-stage the AHB-AP** so that the next write to AP.DRW will target `DHCSR` (`0xE000EDF0`)
-4. **Release NRST** and immediately send a short **burst of DHCSR halt writes** (`0xA05F0003`)
-5. **Re-sync SWD** and re-run DP init (because STM32G0 reset clears DP/AP state)
-6. Proceed with normal flash operations while NRST is HIGH
+3. **Arm halt-on-reset while NRST is LOW** (best-effort)
+   - Write `DEMCR.VC_CORERESET` (vector catch)
+   - Write `DHCSR` with `DBGKEY | C_DEBUGEN | C_HALT`
+4. **Pre-stage the AHB-AP** so that the next write to AP.DRW will target `DHCSR` (`0xE000EDF0`)
+5. **Release NRST** and immediately send the **FIRST DHCSR halt write** (then optionally a few tight retries)
+   - No SWD re-sync, no DP init, no delays in between
+   - Value: `0xA05F0003` (`DBGKEY | C_DEBUGEN | C_HALT`)
+6. **Re-establish SWD/DP state**
+   - First try DP init without a full line reset
+   - If that fails, do SWD line reset + DP init
+7. Proceed with normal flash operations while NRST is HIGH
 
-Implementation reference: [`stm32g0_prog::flash_mass_erase_under_reset()`](src/stm32g0_prog.cpp:275)
+Implementation reference: [`stm32g0_prog::flash_mass_erase_under_reset()`](src/stm32g0_prog.cpp:278)
+
+### Why step 4 must be a single immediate write
+
+If user firmware reconfigures the SWD pins quickly after reset release, any extra work between NRST rising and the
+first halt attempt (for example SWD line re-sync or DP power-up negotiation) can lose the window.
+
+This repo therefore performs the first halt write via a minimal, no-post-idle AP write helper:
+
+- [`swd_min::ap_write_reg_critical()`](src/swd_min.cpp:805)
+
+And releases reset without emitting any Serial prints in the timing-critical window:
+
+- [`swd_min::set_nrst_quiet()`](src/swd_min.cpp:561)
 
 ## Flash Controller Register Addresses
 

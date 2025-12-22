@@ -301,8 +301,29 @@ bool flash_mass_erase_under_reset() {
     return false;
   }
 
-  // Step 3: Pre-stage AP (SELECT + CSW + TAR) so the next DRW write hits DHCSR.
-  Serial.println("Step 3: Pre-stage AHB-AP (CSW + TAR=DHCSR) while NRST LOW...");
+  // Step 3: While NRST is still LOW, set up the debug core state so that the CPU
+  // halts immediately when reset is released.
+  //
+  // Why do this *before* releasing reset?
+  // - When NRST is LOW, the CPU is not executing user firmware, so SWD pins cannot
+  //   be reconfigured out from under us.
+  // - System debug space (DHCSR/DEMCR) is intended to be reachable even while the
+  //   core is held in reset (see repo doc: [`MASS_ERASE.md`](MASS_ERASE.md:9)).
+  //
+  // This reduces dependence on a microsecond-scale timing window after NRST release.
+  Serial.println("Step 3: Arm halt-on-reset while NRST LOW (DEMCR + DHCSR)...");
+
+  // Best-effort: arm vector-catch on core reset.
+  // NOTE: Whether DEMCR.VC_CORERESET persists across reset release is implementation-specific.
+  (void)swd_min::mem_write32(DEMCR, DEMCR_VC_CORERESET);
+
+  // Best-effort: enable debug and request halt.
+  // If this write is latched by the core debug block while the core is in reset, the
+  // core should come up halted immediately at reset release.
+  (void)swd_min::mem_write32(DHCSR, DHCSR_C_DEBUGEN_C_HALT);
+
+  // Step 3b: Pre-stage AP (SELECT + CSW + TAR) so the next DRW write hits DHCSR.
+  Serial.println("Step 3b: Pre-stage AHB-AP (CSW + TAR=DHCSR) while NRST LOW...");
   if (!swd_min::ap_select(/*apsel=*/0, /*apbanksel=*/0)) {
     Serial.println("ERROR: ap_select failed");
     return false;
@@ -320,26 +341,49 @@ bool flash_mass_erase_under_reset() {
   }
 
   // Step 4: CRITICAL TIMING window.
-  // Do not print or delay between releasing NRST and the burst of DRW writes.
-  Serial.println("Step 4: Release NRST and immediately send halt writes...");
-  swd_min::set_nrst(false);
+  // Requirement: after releasing NRST we must NOT do any SWD re-sync/DP init before
+  // attempting the first halt write, because user firmware may remap SWD pins in µs.
+  //
+  // Therefore:
+  //  - release NRST without prints (quiet)
+  //  - perform exactly one immediate AP.DRW write (pre-staged to DHCSR)
+  //  - optionally retry a few times with the tightest possible loop
+  Serial.println("Step 4: Release NRST and immediately send FIRST halt write...");
+  swd_min::set_nrst_quiet(false);
 
-  // Burst a few writes to increase odds of landing before SWD is disabled.
-  // Keep this loop tight: no prints, no delays.
-  for (int i = 0; i < 32; i++) {
-    (void)swd_min::ap_write_reg(swd_min::AP_ADDR_DRW, DHCSR_C_DEBUGEN_C_HALT, &ack);
-    if (ack != swd_min::ACK_OK) break;
+  // Single immediate write (the critical one).
+  uint8_t first_halt_ack = 0;
+  (void)swd_min::ap_write_reg_critical(swd_min::AP_ADDR_DRW, DHCSR_C_DEBUGEN_C_HALT, &first_halt_ack);
+
+  // Optional tight retries (no prints, no post-idle cycles) to increase odds.
+  // Keep count small; any extra SWCLK edges are still time.
+  ack = first_halt_ack;
+  if (ack != swd_min::ACK_OK) {
+    for (int i = 0; i < 8; i++) {
+      (void)swd_min::ap_write_reg_critical(swd_min::AP_ADDR_DRW, DHCSR_C_DEBUGEN_C_HALT, &ack);
+      if (ack == swd_min::ACK_OK) break;
+    }
   }
+
+  // Exit the critical window: now it's safe to print/delay.
+  Serial.println("---------------------------------------- NRST HIGH");
+  Serial.printf("Immediate halt write ACK=%u (%s)\n", (unsigned)first_halt_ack, swd_min::ack_to_str(first_halt_ack));
 
   // Give the core/debug fabric a moment to settle.
   delay(2);
 
-  // Step 5: Re-sync SWD protocol and re-run DP init now that NRST is HIGH.
-  Serial.println("Step 5: Re-sync SWD + DP init (NRST HIGH)...");
-  swd_min::swd_line_reset();
+  // Step 5: Re-establish SWD/DP after NRST release.
+  // Prefer the *cheapest* thing first: try DP init without doing a full line-reset.
+  // If this works, we avoid spending extra time clocking SWD (which matters if the
+  // core did not actually halt).
+  Serial.println("Step 5: DP init (NRST HIGH) - try without line-reset...");
   if (!swd_min::dp_init_and_power_up()) {
-    Serial.println("ERROR: dp_init_and_power_up failed (NRST HIGH)");
-    return false;
+    Serial.println("Step 5b: DP init failed; re-sync SWD physical layer then retry DP init...");
+    swd_min::swd_line_reset();
+    if (!swd_min::dp_init_and_power_up()) {
+      Serial.println("ERROR: dp_init_and_power_up failed (NRST HIGH)");
+      return false;
+    }
   }
 
   // Step 6: Ensure debug+halt is asserted (safe even if already halted).

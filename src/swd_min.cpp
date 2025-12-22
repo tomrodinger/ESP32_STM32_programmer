@@ -479,7 +479,7 @@ static bool ap_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out, bool log_
   return true;
 }
 
-static bool ap_write(uint8_t addr, uint32_t val, uint8_t *ack_out, bool log_enable) {
+static bool ap_write_internal(uint8_t addr, uint32_t val, uint8_t *ack_out, bool log_enable, bool post_idle) {
   const uint8_t req = make_request(/*APnDP=*/1, /*RnW=*/0, addr);
 
   (void)req; // request byte is not printed (not useful for humans)
@@ -503,7 +503,10 @@ static bool ap_write(uint8_t addr, uint32_t val, uint8_t *ack_out, bool log_enab
   if (ack != ACK_OK) {
     pulse_clock();
     pulse_clock();
-    line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
+    // Get back to a known host-driven state.
+    swdio_output();
+    swdio_write(0);
+    if (post_idle) line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
     return false;
   }
 
@@ -515,13 +518,20 @@ static bool ap_write(uint8_t addr, uint32_t val, uint8_t *ack_out, bool log_enab
   for (int i = 0; i < 32; i++) write_bit((val >> i) & 1u);
   write_bit(parity_u32(val));
 
+  // Leave line in a known idle-low state.
+  swdio_write(0);
+
   // Post-transfer idle/flush (low)
   if (g_verbose && log_enable) {
     Serial.printf("%s (AP WRITE %s addr=0x%02X, data=0x%08lX, ACK=%u %s)\n", ap_write_purpose(addr, val),
                   ap_reg_name(addr), (unsigned)addr, (unsigned long)val, (unsigned)ack, ack_to_str(ack));
   }
-  line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
+  if (post_idle) line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
   return true;
+}
+
+static bool ap_write(uint8_t addr, uint32_t val, uint8_t *ack_out, bool log_enable) {
+  return ap_write_internal(addr, val, ack_out, log_enable, /*post_idle=*/true);
 }
 
 void begin(const Pins &pins) {
@@ -545,6 +555,13 @@ void set_nrst(bool asserted) {
     Serial.printf("---------------------------------------- NRST %s\n", next_high ? "HIGH" : "LOW");
     g_nrst_last_high = next_high;
   }
+  digitalWrite(g_pins.nrst, asserted ? LOW : HIGH);
+}
+
+void set_nrst_quiet(bool asserted) {
+  // asserted=true => drive NRST low
+  const bool next_high = asserted ? false : true;
+  g_nrst_last_high = next_high;
   digitalWrite(g_pins.nrst, asserted ? LOW : HIGH);
 }
 
@@ -781,6 +798,13 @@ bool ap_read_reg(uint8_t addr, uint32_t *val_out, uint8_t *ack_out) {
 bool ap_write_reg(uint8_t addr, uint32_t val, uint8_t *ack_out) {
   uint8_t ack = 0;
   const bool ok = ap_write(addr, val, &ack, /*log_enable=*/false);
+  if (ack_out) *ack_out = ack;
+  return ok;
+}
+
+bool ap_write_reg_critical(uint8_t addr, uint32_t val, uint8_t *ack_out) {
+  uint8_t ack = 0;
+  const bool ok = ap_write_internal(addr, val, &ack, /*log_enable=*/false, /*post_idle=*/false);
   if (ack_out) *ack_out = ack;
   return ok;
 }

@@ -57,6 +57,11 @@ bool read_idcode(uint32_t *idcode_out, uint8_t *ack_out = nullptr);
 // Reset pin control.
 void set_nrst(bool asserted);
 
+// Reset pin control without emitting the "NRST HIGH/LOW" banner line.
+// This is used in the critical timing window where the target firmware may
+// reconfigure SWD pins immediately after reset release.
+void set_nrst_quiet(bool asserted);
+
 // Returns the current output level on the NRST pin (true = HIGH, false = LOW).
 // NOTE: NRST is driven by the ESP32, so this reflects what we are driving.
 bool nrst_is_high();
@@ -88,6 +93,11 @@ bool ap_select(uint8_t apsel, uint8_t apbanksel);
 // AP read is *posted* in SWD: this helper returns the true value via RDBUFF.
 bool ap_read_reg(uint8_t addr, uint32_t *val_out, uint8_t *ack_out = nullptr);
 bool ap_write_reg(uint8_t addr, uint32_t val, uint8_t *ack_out = nullptr);
+
+// Critical-window AP write: performs a single AP write with minimal post-transaction
+// overhead (no post-idle cycles, no human logging). Intended for the first DHCSR halt
+// write right after NRST release.
+bool ap_write_reg_critical(uint8_t addr, uint32_t val, uint8_t *ack_out = nullptr);
 
 // AHB-AP memory access helpers (32-bit).
 bool mem_write32(uint32_t addr, uint32_t val);
