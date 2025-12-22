@@ -665,4 +665,35 @@ bool read_program_counter() {
   return true;
 }
 
+bool prepare_target_for_normal_run() {
+  // Rationale:
+  // - During programming/debug we may have left the core halted via DHCSR.C_HALT.
+  // - We may also have enabled vector-catch-on-reset (DEMCR.VC_CORERESET) as part
+  //   of the connect-under-reset recovery flow.
+  // Either of these can prevent the application firmware from running normally
+  // after a simple NRST pulse.
+  //
+  // Clear VC_CORERESET and clear the halt request, but keep debug enabled so we
+  // can still re-attach quickly if needed.
+
+  // Best-effort: clear vector catch on reset.
+  uint32_t demcr = 0;
+  if (!swd_min::mem_read32(DEMCR, &demcr)) return false;
+  demcr &= ~DEMCR_VC_CORERESET;
+  if (!swd_min::mem_write32(DEMCR, demcr)) return false;
+
+  // Clear C_HALT (bit1) while keeping C_DEBUGEN (bit0) set.
+  // Writes to DHCSR require the DBGKEY in upper 16 bits.
+  static constexpr uint32_t DHCSR_C_DEBUGEN_ONLY = DHCSR_DBGKEY | DHCSR_C_DEBUGEN;
+  if (!swd_min::mem_write32(DHCSR, DHCSR_C_DEBUGEN_ONLY)) return false;
+
+  // Optional: read back for diagnostics when verbose.
+  if (verbose()) {
+    uint32_t dhcsr = 0;
+    (void)swd_min::mem_read32_verbose("Read DHCSR after clearing C_HALT", DHCSR, &dhcsr);
+  }
+
+  return true;
+}
+
 } // namespace stm32g0_prog

@@ -548,6 +548,15 @@ void begin(const Pins &pins) {
   swdio_write(1);
 }
 
+void release_swd_pins() {
+  // Put SWD pins into high-impedance state so the target firmware can repurpose
+  // them without fighting our GPIO drivers.
+  //
+  // NOTE: this intentionally does not touch NRST.
+  pinMode(g_pins.swclk, INPUT);
+  pinMode(g_pins.swdio, INPUT);
+}
+
 void set_nrst(bool asserted) {
   // asserted=true => drive NRST low
   const bool next_high = asserted ? false : true;

@@ -132,6 +132,7 @@ In this edge-only model, the only legal SWDIO transitions are:
       -   Use serial commands:
           - `h` help
           - `i` reset + read DP IDCODE
+          - `R` let firmware run: clear debug-halt state, pulse NRST (>=1ms low), then release SWD pins
           - `d` toggle SWD verbose diagnostics (prints DP/AP/memory access details)
           - `t` SWD smoke test (attempts DP power-up handshake + AHB-AP IDR read; may fail on current hardware)
           - `c` DP CTRL/STAT single-write test (writes DP[0x04]=0x50000000; requires `i` first)

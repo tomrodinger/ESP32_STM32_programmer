@@ -27,6 +27,11 @@ static constexpr uint8_t ACK_FAULT = 0b100;
 
 void begin(const Pins &pins);
 
+// Release SWD pins (SWCLK/SWDIO) to high-impedance INPUT.
+// This is useful when you want the target firmware to run and potentially repurpose
+// those pins as GPIO without electrical contention from the host.
+void release_swd_pins();
+
 // Enable verbose SWD diagnostics printed to Serial (best for bench debugging).
 // Default: true.
 void set_verbose(bool enabled);

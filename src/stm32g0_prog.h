@@ -37,4 +37,10 @@ bool flash_read_bytes(uint32_t addr, uint8_t *out, uint32_t len, uint32_t *flash
 // Returns true if successful.
 bool read_program_counter();
 
+// Best-effort helper to let the target run normally after we've been debugging.
+// Clears vector-catch-on-reset (DEMCR.VC_CORERESET) and clears core halt request
+// (DHCSR.C_HALT). Leaves debug enabled (DHCSR.C_DEBUGEN) so we can still re-attach
+// without power-cycling.
+bool prepare_target_for_normal_run();
+
 } // namespace stm32g0_prog

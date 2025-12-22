@@ -14,6 +14,7 @@ static void print_help() {
   Serial.println("Commands:");
   Serial.println("  h = help");
   Serial.println("  i = reset + read DP IDCODE");
+  Serial.println("  R = let firmware run: clear debug-halt state, pulse NRST, then release SWD pins");
   Serial.println("  t = SWD smoke test (DP power-up handshake + AHB-AP IDR)");
   Serial.println("  d = toggle SWD verbose diagnostics");
   Serial.println("  b = DP ABORT write test (write under NRST low, then under NRST high)");
@@ -24,6 +25,29 @@ static void print_help() {
   Serial.println("  w = write firmware to flash");
   Serial.println("  v = verify firmware in flash (dumps bytes read + mismatch count)");
   Serial.println("  a = all: connect+halt, erase, write, verify");
+}
+
+static void cmd_reset_pulse_run() {
+  // A reliable way to "let the core run again" after it has been halted by SWD:
+  // 1) Clear any debug-state that can keep the CPU halted (DHCSR.C_HALT)
+  //    and disable vector-catch-on-reset (DEMCR.VC_CORERESET).
+  // 2) Pulse NRST low, then release.
+  //
+  // Note: if the target firmware re-purposes SWD pins, a physically connected debugger
+  // (or our own SWD line driving) can interfere electrically. We therefore avoid doing
+  // any SWD activity after the reset pulse.
+
+  Serial.println("Preparing target for normal run (clear C_HALT + clear VC_CORERESET)...");
+  const bool prep_ok = stm32g0_prog::prepare_target_for_normal_run();
+  Serial.println(prep_ok ? "Prep OK" : "Prep FAIL (continuing with NRST pulse)");
+
+  Serial.println("Pulsing NRST LOW for 2ms, then releasing HIGH...");
+  swd_min::set_nrst(true);
+  delay(2);
+  swd_min::set_nrst(false);
+
+  // After reset, avoid continuing to drive SWD lines; target firmware may repurpose them.
+  swd_min::release_swd_pins();
 }
 
 static bool print_idcode_attempt() {
@@ -230,6 +254,10 @@ void loop() {
 
     case 'i':
       print_idcode_attempt();
+      break;
+
+    case 'R':
+      cmd_reset_pulse_run();
       break;
 
     case 't':
