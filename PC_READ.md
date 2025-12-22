@@ -162,7 +162,7 @@ The fact that we **cannot reproduce the original "SWD stops working" issue** on 
 Use command `i` (IDCODE read) to verify SWD connectivity - this works reliably
 
 ### For Programming Chips with Firmware That Disables SWD
-Use command `m` (mass erase under reset) - this is the proven working method
+Use command `e` (mass erase using connect-under-reset recovery) - this is the proven working method
 
 ### For Reading Core State
 The `connect_and_halt()` function in [`stm32g0_prog.cpp`](src/stm32g0_prog.cpp:107) uses the proper sequence:

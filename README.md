@@ -66,10 +66,10 @@ End-to-end programming should follow this sequence (both on hardware and in the 
 
 1. SWD attach + **DP `IDCODE` read** (prove physical/protocol layer)
 2. **DP init + power-up** (ADIv5 `CTRL/STAT` handshake) via [`swd_min::dp_init_and_power_up()`](src/swd_min.cpp:392)
-3. **Connect + halt** core via [`stm32g0_prog::connect_and_halt()`](src/stm32g0_prog.cpp:76)
-4. **Flash mass erase** via [`stm32g0_prog::flash_mass_erase()`](src/stm32g0_prog.cpp:105)
-5. **Flash program** (in the simulator: a small 8-byte payload) via [`stm32g0_prog::flash_program()`](src/stm32g0_prog.cpp:130)
-6. **Verify** by reading flash back and comparing via [`stm32g0_prog::flash_verify_and_dump()`](src/stm32g0_prog.cpp:186)
+  3. **Connect + halt** core via [`stm32g0_prog::connect_and_halt()`](src/stm32g0_prog.cpp:76)
+  4. **Flash mass erase** via [`stm32g0_prog::flash_mass_erase_under_reset()`](src/stm32g0_prog.cpp:275)
+  5. **Flash program** (in the simulator: a small 8-byte payload) via [`stm32g0_prog::flash_program()`](src/stm32g0_prog.cpp:130)
+  6. **Verify** by reading flash back and comparing via [`stm32g0_prog::flash_verify_and_dump()`](src/stm32g0_prog.cpp:186)
 
 ### What’s in this repo
 
@@ -137,7 +137,7 @@ In this edge-only model, the only legal SWDIO transitions are:
           - `c` DP CTRL/STAT single-write test (writes DP[0x04]=0x50000000; requires `i` first)
           - `b` DP ABORT write test (writes DP[0x00]=0x1E under NRST low then high)
           - `r` read first 8 bytes of target flash @ `0x08000000`
-         - `e` mass erase
+          - `e` mass erase (connect-under-reset recovery method)
          - `w` write embedded firmware
          - `v` verify embedded firmware
          - `a` all (connect+halt, erase, write, verify)

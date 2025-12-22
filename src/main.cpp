@@ -20,8 +20,7 @@ static void print_help() {
   Serial.println("  c = DP CTRL/STAT single-write test (DP[0x04]=0x50000000)");
   Serial.println("  p = read Program Counter (PC) register (tests core register access)");
   Serial.println("  r = read first 8 bytes of target flash @ 0x08000000");
-  Serial.println("  e = erase entire flash (mass erase)");
-  Serial.println("  m = MASS ERASE UNDER RESET (for chips with SWD disabled by firmware)");
+  Serial.println("  e = erase entire flash (mass erase; connect-under-reset recovery method)");
   Serial.println("  w = write firmware to flash");
   Serial.println("  v = verify firmware in flash (dumps bytes read + mismatch count)");
   Serial.println("  a = all: connect+halt, erase, write, verify");
@@ -51,8 +50,10 @@ static bool cmd_connect() {
 }
 
 static bool cmd_erase() {
-  if (!cmd_connect()) return false;
-  const bool ok = stm32g0_prog::flash_mass_erase();
+  // Historical note: 'e' originally used a normal connect+halt flow. We now route
+  // mass erase through the connect-under-reset recovery flow so it also works on
+  // chips where user firmware disables SWD quickly.
+  const bool ok = stm32g0_prog::flash_mass_erase_under_reset();
   Serial.println(ok ? "Erase OK" : "Erase FAIL");
   return ok;
 }
@@ -261,14 +262,6 @@ void loop() {
 
     case 'e':
       cmd_erase();
-      break;
-
-    case 'm':
-      Serial.println("Mass erase under reset (NRST held LOW throughout)...");
-      {
-        const bool ok = stm32g0_prog::flash_mass_erase_under_reset();
-        Serial.println(ok ? "Mass erase under reset: OK" : "Mass erase under reset: FAIL");
-      }
       break;
 
     case 'w':

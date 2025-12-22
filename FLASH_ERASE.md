@@ -215,6 +215,8 @@ Important robustness detail:
 - Poll FLASH_SR.BSY until it becomes 0 (timeout large enough for worst-case erase time).
 - After BSY clears:
   - Check EOP indicates successful completion.
+    - Bench note for this project: we have observed cases where `FLASH_SR` reads back as `0x00000000` at completion (so `EOP` appears clear) even though flash contents are erased (verified by reading back `0xFFFFFFFF` at `0x08000000`).
+    - Therefore, treat `EOP==0` as a warning and always verify flash contents.
   - Check error flags; if any are set (WRP/protection, operation error, etc.), treat erase as failed.
 
 Protection-related failure modes to account for:

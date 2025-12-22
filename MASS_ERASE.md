@@ -14,17 +14,18 @@ When NRST is held LOW:
 
 This is because the AHB peripheral bus is held in reset state when NRST is asserted. The peripheral clocks are not running and register access doesn't work properly.
 
-## The Correct Sequence Using VC_CORERESET
+## Practical sequence used in this repo
 
-The proper "connect under reset" sequence uses the **VC_CORERESET** (Vector Catch on Core Reset) feature:
+This repo implements a **timing-based connect-under-reset recovery flow**:
 
 1. **Assert NRST LOW** (hold target in reset)
-2. **Initialize Debug Port** via SWD (this works while NRST is LOW)
-3. **Set VC_CORERESET bit in DEMCR** (0xE000EDFC bit 0) - this IS accessible while NRST is LOW because it's in the always-on debug system space
-4. **Release NRST** - core exits reset but immediately HALTS before executing ANY instruction
-5. **Peripherals are now accessible** and firmware has NOT executed (SWD pins not disabled)
-6. **Perform flash operations**
-7. **Clear VC_CORERESET** and clean up
+2. **Initialize Debug Port** via SWD (DP init + power-up)
+3. **Pre-stage the AHB-AP** so that the next write to AP.DRW will target `DHCSR` (`0xE000EDF0`)
+4. **Release NRST** and immediately send a short **burst of DHCSR halt writes** (`0xA05F0003`)
+5. **Re-sync SWD** and re-run DP init (because STM32G0 reset clears DP/AP state)
+6. Proceed with normal flash operations while NRST is HIGH
+
+Implementation reference: [`stm32g0_prog::flash_mass_erase_under_reset()`](src/stm32g0_prog.cpp:275)
 
 ## Flash Controller Register Addresses
 
@@ -97,10 +98,10 @@ The flash must be unlocked by writing KEY1 then KEY2 to FLASH_KEYR in sequence.
 ## Complete Mass Erase Sequence
 
 ### Prerequisites
-1. NRST held LOW (target in reset)
-2. SWD communication established (line reset, IDCODE read OK)
-3. Debug power domain enabled (CSYSPWRUPREQ + CDBGPWRUPREQ in DP CTRL/STAT)
-4. AHB-AP selected and configured (CSW = 0x23000012 for 32-bit access)
+1. SWD communication can be established (line reset, IDCODE read OK)
+2. Debug power domain enabled (CSYSPWRUPREQ + CDBGPWRUPREQ in DP CTRL/STAT)
+3. AHB-AP selected and configured (CSW = 0x23000012 for 32-bit access)
+4. For recovery from SWD-disabled firmware: use the connect-under-reset recovery flow above
 
 ### Step-by-Step Procedure
 
@@ -190,10 +191,11 @@ Each flash register access requires these AHB-AP operations:
 ## Implementation Notes
 
 ### NRST Handling
-- **Keep NRST LOW throughout the entire mass erase operation**
-- This prevents the CPU from executing any code that might interfere
-- The flash controller operates independently of the CPU reset state
-- After mass erase completes, releasing NRST will boot from empty flash
+
+Do **not** keep NRST LOW while performing FLASH register reads/writes.
+
+- While NRST is LOW, AHB peripheral accesses can read as `0x00000000` (peripheral bus held in reset).
+- The recovery strategy is: hold NRST low only long enough to init DP + pre-stage AP, then release NRST and halt.
 
 ### Error Recovery
 If mass erase fails:
