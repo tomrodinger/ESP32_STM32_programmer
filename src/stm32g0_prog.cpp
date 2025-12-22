@@ -675,73 +675,46 @@ bool flash_verify_and_dump(uint32_t addr, const uint8_t *data, uint32_t len) {
 
 bool read_program_counter() {
   // This function reads the Program Counter (PC) register to prove we can access
-  // core registers with NRST HIGH. On a fresh unprogrammed chip, this shows:
-  // 1. SWD connection works with NRST HIGH (not stuck in reset)
-  // 2. We can halt the core and access debug registers
-  // 3. We can read CPU core registers through CoreSight
+  // core registers while NRST is HIGH.
+  //
+  // IMPORTANT:
+  // - CoreSight core-register reads require the core to be halted.
+  // - Therefore, multiple reads will typically return the SAME PC while halted.
   //
   // ARM CoreSight mechanism for reading core registers:
-  // - Halt the core (write to DHCSR)
-  // - Write register number to DCRSR (Debug Core Register Selector)
-  // - Wait for S_REGRDY bit in DHCSR
-  // - Read value from DCRDR (Debug Core Register Data)
+  // 1) Halt the core (write to DHCSR)
+  // 2) Write register number to DCRSR (Debug Core Register Selector)
+  // 3) Wait for S_REGRDY bit in DHCSR
+  // 4) Read value from DCRDR (Debug Core Register Data)
   //
   // Source: ARM Cortex-M0+ Technical Reference Manual, Section 10.2
 
   Serial.println("Reading Program Counter (PC) register...");
-  Serial.println("This test proves we can read core registers while NRST is HIGH");
-  
-  // Step 1: Reset and establish initial SWD connection with NRST LOW
-  Serial.println("Step 1: Reset and establish SWD connection (NRST LOW)...");
-  swd_min::reset_and_switch_to_swd();  // This asserts NRST
-  
-  if (!swd_min::dp_init_and_power_up()) {
-    Serial.println("ERROR: dp_init_and_power_up failed");
+  Serial.println("This test proves we can read core registers after the same connect+halt sequence used by 'r'");
+
+  // Reuse the bench-proven attach sequence (same as 'r'): reset + DP power-up + connect-under-reset + halt.
+  if (!connect_and_halt()) {
+    Serial.println("ERROR: connect_and_halt failed");
     return false;
   }
-  Serial.println("  SWD initialized (NRST still LOW)");
-  
-  // Step 2: Release NRST and re-establish connection
-  Serial.println("Step 2: Release NRST and re-establish connection...");
-  if (!swd_min::connect_under_reset_and_init()) {
-    Serial.println("ERROR: connect_under_reset_and_init failed");
-    return false;
-  }
-  Serial.println("  SWD connection established with NRST HIGH - SUCCESS!");
-  Serial.println("  (This proves SWD works with NRST high on fresh chip)");
-  
-  // Step 3: Halt the core so we can access debug registers
-  Serial.println("Step 3: Halt the core...");
-  if (!swd_min::mem_write32_verbose("Enable debug and halt the CPU (DHCSR)", DHCSR, DHCSR_C_DEBUGEN_C_HALT)) {
-    Serial.println("ERROR: Failed to write DHCSR to halt core");
-    return false;
-  }
-  
-  // Wait for halt to take effect
-  delay(5);
-  
-  // Verify core is halted
+
   uint32_t dhcsr = 0;
-  if (!swd_min::mem_read32_verbose("Read DHCSR status", DHCSR, &dhcsr)) {
+  if (!swd_min::mem_read32_verbose("Read DHCSR status (confirm debug+halt)", DHCSR, &dhcsr)) {
     Serial.println("ERROR: Failed to read DHCSR");
     return false;
   }
-  
-  Serial.printf("  DHCSR = 0x%08lX (C_DEBUGEN=%d, S_HALT=%d, S_REGRDY=%d)\n",
+
+  Serial.printf("DHCSR = 0x%08lX (C_DEBUGEN=%d, S_HALT=%d, S_REGRDY=%d)\n",
                 (unsigned long)dhcsr,
                 (dhcsr & DHCSR_C_DEBUGEN) ? 1 : 0,
                 (dhcsr & DHCSR_S_HALT) ? 1 : 0,
                 (dhcsr & DHCSR_S_REGRDY) ? 1 : 0);
-  
+
   if ((dhcsr & DHCSR_S_HALT) == 0) {
-    Serial.println("WARN: Core did not halt, but continuing anyway...");
-  } else {
-    Serial.println("  Core is halted - good!");
+    Serial.println("WARN: Core did not report HALT; core-register access may fail");
   }
-  
-  // Step 4: Read PC multiple times to show it's changing
-  Serial.println("Step 4: Reading PC register multiple times...");
-  Serial.println("  (If values change, core is executing instructions)");
+
+  Serial.println("Reading PC (R15) 5 times while halted...");
   
   uint32_t pc_values[5];
   bool all_reads_ok = true;
@@ -758,7 +731,7 @@ bool read_program_counter() {
     
     // Wait for S_REGRDY in DHCSR (indicates register transfer complete)
     bool ready = false;
-    for (int wait = 0; wait < 100; wait++) {
+    for (int wait = 0; wait < 200; wait++) {
       if (!swd_min::mem_read32(DHCSR, &dhcsr)) {
         Serial.printf("ERROR: Failed to read DHCSR (iteration %d)\n", i);
         all_reads_ok = false;
@@ -771,12 +744,11 @@ bool read_program_counter() {
       delayMicroseconds(10);
     }
     
-      if (!ready) {
-        Serial.printf("ERROR: S_REGRDY timeout (iteration %d, DHCSR=0x%08lX)\n",
-                      i, (unsigned long)dhcsr);
-        all_reads_ok = false;
-        break;
-      }
+    if (!ready) {
+      Serial.printf("ERROR: S_REGRDY timeout (iteration %d, DHCSR=0x%08lX)\n", i, (unsigned long)dhcsr);
+      all_reads_ok = false;
+      break;
+    }
     
     // Read the PC value from DCRDR
     uint32_t pc = 0;
@@ -788,9 +760,19 @@ bool read_program_counter() {
     
     pc_values[i] = pc;
     Serial.printf("  Read %d: PC = 0x%08lX\n", i + 1, (unsigned long)pc);
-    
-    // Small delay before next read to give core time to execute
-    delayMicroseconds(100);
+
+    // Extra sanity check (non-fatal): try reading the memory word containing the current PC.
+    // This helps distinguish a plausible internal ROM/flash address from a bogus value.
+    if (i == 0) {
+      const uint32_t pc_aligned = pc & ~0x3u;
+      uint32_t instr_word = 0;
+      if (swd_min::mem_read32_verbose("Sanity: read 32-bit word at PC-aligned address", pc_aligned, &instr_word)) {
+        Serial.printf("  Word @ PC(align) 0x%08lX = 0x%08lX\n", (unsigned long)pc_aligned,
+                      (unsigned long)instr_word);
+      } else {
+        Serial.println("  WARN: Could not read memory at PC address (sanity check)");
+      }
+    }
   }
   
   if (!all_reads_ok) {
@@ -798,10 +780,9 @@ bool read_program_counter() {
     return false;
   }
   
-  // Step 5: Analyze the results
-  Serial.println("\nStep 5: Analysis:");
-  
-  // Check if PC values are changing (proves core is running)
+  Serial.println("\nAnalysis:");
+
+  // Check if PC values are changing. While halted, this should normally be NO.
   bool pc_changed = false;
   for (int i = 1; i < 5; i++) {
     if (pc_values[i] != pc_values[0]) {
@@ -809,7 +790,7 @@ bool read_program_counter() {
       break;
     }
   }
-  
+
   // Check if PC is in valid flash range (0x08000000 - 0x08010000)
   bool pc_in_flash = true;
   for (int i = 0; i < 5; i++) {
@@ -819,8 +800,8 @@ bool read_program_counter() {
     }
   }
   
-  Serial.printf("  PC changed between reads: %s\n", pc_changed ? "YES (core is executing!)" : "NO (core may be halted/stuck)");
-  Serial.printf("  PC in valid flash range:  %s\n", pc_in_flash ? "YES (0x08000000-0x08010000)" : "NO (unexpected)");
+  Serial.printf("  PC changed between reads: %s\n", pc_changed ? "YES" : "NO (expected while halted)");
+  Serial.printf("  PC in main flash range:   %s\n", pc_in_flash ? "YES (0x08000000-0x08010000)" : "NO (may be ROM/system memory)");
   
   // Check if all PC values are 0 (indicates core may not be running or debug not working)
   bool all_zero = true;
@@ -836,21 +817,9 @@ bool read_program_counter() {
     Serial.println("           This is normal for a completely blank/unprogrammed chip");
   }
   
-  // Success criteria: We were able to read PC (proves register access works)
-  // The PC value may or may not change depending on chip state
   Serial.println("\n=== RESULT ===");
-  Serial.println("SUCCESS: We can read the Program Counter register while NRST is HIGH!");
-  Serial.println("This proves:");
-  Serial.println("  1. SWD connection works with NRST HIGH (not stuck in reset)");
-  Serial.println("  2. Debug register access is functional");
-  Serial.println("  3. We can read CPU core registers through CoreSight");
-  
-  if (pc_changed) {
-    Serial.println("  4. Core is EXECUTING code (PC is changing)");
-  } else {
-    Serial.println("  4. Core appears halted/stuck (PC not changing)");
-    Serial.println("     (This is expected for unprogrammed/blank flash)");
-  }
+  Serial.println("SUCCESS: Read PC via CoreSight (DCRSR/DCRDR) with NRST HIGH");
+  Serial.println("(Core left halted by connect_and_halt())");
   
   return true;
 }

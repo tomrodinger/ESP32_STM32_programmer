@@ -36,7 +36,10 @@ except Exception as e:  # pragma: no cover
     raise
 
 
-ALLOWED_CMDS = set("hidbtcpermwva") | {"r"}
+# Keep in sync with the command table printed by the ESP32 firmware.
+# NOTE: We intentionally gate which commands can be sent to avoid accidental
+# destructive actions when iterating.
+ALLOWED_CMDS = set("hidbtcpermwva") | {"r", "p"}
 
 
 def _run(cmd: List[str]) -> None:

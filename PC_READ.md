@@ -46,11 +46,25 @@ swd_min::connect_under_reset_and_init();
 - DP init and power-up succeeds
 - This **proves SWD works with NRST HIGH on fresh chip**
 
-### Step 3: Read DHCSR Register
-```
-swd_min::mem_read32(DHCSR, &dhcsr);  // Address 0xE000EDF0
-```
-**Result:** ❌ FAULT - Cannot read DHCSR
+### Step 3: Halt core (bench-proven sequence) and then read DHCSR
+
+The earlier experiments attempted to access core/debug registers without consistently using the same
+connect+halt sequence that was proven to work for flash reads (command `r`).
+
+The current implementation of the `p` command now reuses the exact same attach flow as `r`:
+
+1. [`stm32g0_prog::connect_and_halt()`](src/stm32g0_prog.cpp:119)
+   - [`swd_min::reset_and_switch_to_swd()`](src/swd_min.cpp:555)
+   - [`swd_min::dp_init_and_power_up()`](src/swd_min.cpp:675)
+   - [`swd_min::connect_under_reset_and_init()`](src/swd_min.cpp:590)
+   - Write DHCSR to enable debug + halt
+
+2. Once halted, the code reads DHCSR and performs the CoreSight register-transfer:
+   - write DCRSR with REGNUM_PC
+   - wait for DHCSR.S_REGRDY
+   - read DCRDR
+
+This aligns the PC-read preconditions with the working flash-read preconditions.
 
 ### Detailed Failure Analysis
 
@@ -80,7 +94,7 @@ The FAULT on DP RDBUFF (0x0C) after an AP READ suggests one of:
 3. **Timing Issue**: After NRST release, there may be a critical timing window where debug registers are not yet accessible
 4. **Sticky Error State**: A previous operation may have set an error flag that prevents subsequent reads
 
-## Root Cause Hypothesis
+## Root Cause Hypothesis (historical)
 
 On STM32G0 (Cortex-M0+), **debug registers like DHCSR cannot be accessed while the core is running**, even with debug enabled. The ARM CoreSight specification states that core register access (via DCRSR/DCRDR) requires the core to be halted.
 
@@ -177,6 +191,30 @@ For 32-bit memory access via AHB-AP:
 
 ## Conclusion
 
-While we could not successfully read the PC register due to debug register access restrictions, we **proved the key hypothesis**: SWD communication works perfectly with NRST HIGH on a fresh unprogrammed chip. The original issue of "SWD stops working after releasing NRST" is **NOT present** on fresh chips, strongly suggesting it's caused by application firmware reconfiguring the SWD pins.
+Earlier attempts could not successfully read the PC register due to debug register access faults.
 
-The attempted implementation remains in the code as reference, with the 'p' command available for future experimentation.
+The `p` command is now implemented by reusing the same connect-under-reset + halt sequence as the working `r` command.
+That makes the PC read attempt consistent with the known-good attach flow.
+
+## Is the PC value “valid”?
+
+In the latest run, the PC was:
+
+- `PC = 0x1FFF15B4`
+
+This is **not** in main flash (`0x08000000..0x0800FFFF`), but it *is* in the STM32 “0x1FFFxxxx” region.
+We can at least prove that the address is readable and contains plausible Thumb instructions:
+
+- The firmware additionally reads the 32-bit word at the PC-aligned address and got `0x47004800`.
+
+Without pulling in the ST reference manual / datasheet section for “System memory” address mapping, we should avoid
+asserting the exact boot ROM range here.
+
+What we *can* cite from the device header in this repo is that the STM32G031 has multiple documented peripherals/
+tables in the `0x1FFFxxxx` region (device electronic signature):
+
+- [`UID_BASE`](docs/stm32g031xx.h:635) is `0x1FFF7590`
+- [`FLASHSIZE_BASE`](docs/stm32g031xx.h:638) is `0x1FFF75E0`
+
+So `0x1FFF15B4` is within a region that is definitely mapped on-chip (not a wild pointer), and the fact we can read
+instruction-like data from it makes the captured PC value **plausible**.
