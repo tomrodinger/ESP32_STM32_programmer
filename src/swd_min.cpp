@@ -1,5 +1,9 @@
 #include "swd_min.h"
 
+#if defined(ARDUINO_ARCH_ESP32)
+#include "driver/gpio.h"
+#endif
+
 namespace swd_min {
 
 static Pins g_pins;
@@ -24,15 +28,27 @@ bool verbose_enabled() { return g_verbose; }
 static inline void swd_delay() { delayMicroseconds(SWD_HALF_PERIOD_US); }
 
 static inline void swclk_low() {
+#if defined(ARDUINO_ARCH_ESP32)
+  gpio_set_level((gpio_num_t)g_pins.swclk, 0);
+#else
   digitalWrite(g_pins.swclk, LOW);
+#endif
 }
 
 static inline void swclk_high() {
+#if defined(ARDUINO_ARCH_ESP32)
+  gpio_set_level((gpio_num_t)g_pins.swclk, 1);
+#else
   digitalWrite(g_pins.swclk, HIGH);
+#endif
 }
 
 static inline void swdio_output() {
+#if defined(ARDUINO_ARCH_ESP32)
+  gpio_set_direction((gpio_num_t)g_pins.swdio, GPIO_MODE_OUTPUT);
+#else
   pinMode(g_pins.swdio, OUTPUT);
+#endif
 }
 
 static inline void swdio_input_pullup() {
@@ -40,15 +56,41 @@ static inline void swdio_input_pullup() {
   // On the bench we use the ESP32 pull-down plus the target's pull-up to detect
   // that the line is truly released (mid-rail behavior).
   // NOTE: name kept as-is; simulator may override how INPUT_PULLDOWN is interpreted.
+#if defined(ARDUINO_ARCH_ESP32)
+  gpio_set_direction((gpio_num_t)g_pins.swdio, GPIO_MODE_INPUT);
+  gpio_set_pull_mode((gpio_num_t)g_pins.swdio, GPIO_PULLDOWN_ONLY);
+#else
   pinMode(g_pins.swdio, INPUT_PULLDOWN);
+#endif
 }
 
 static inline void swdio_write(uint8_t bit) {
+#if defined(ARDUINO_ARCH_ESP32)
+  gpio_set_level((gpio_num_t)g_pins.swdio, bit ? 1 : 0);
+#else
   digitalWrite(g_pins.swdio, bit ? HIGH : LOW);
+#endif
 }
 
 static inline uint8_t swdio_read() {
+#if defined(ARDUINO_ARCH_ESP32)
+  return (uint8_t)gpio_get_level((gpio_num_t)g_pins.swdio);
+#else
   return (uint8_t)digitalRead(g_pins.swdio);
+#endif
+}
+
+static inline void ensure_swd_pin_modes() {
+  // Commands like [`swd_min::release_swd_pins()`](src/swd_min.cpp:551) intentionally put SWD pins into INPUT.
+  // Any subsequent SWD activity must re-assert OUTPUT mode (especially SWCLK), otherwise the bus will appear dead
+  // and we'll sample garbage ACK values (often 0b111).
+#if defined(ARDUINO_ARCH_ESP32)
+  gpio_set_direction((gpio_num_t)g_pins.swclk, GPIO_MODE_OUTPUT);
+#else
+  pinMode(g_pins.swclk, OUTPUT);
+#endif
+  swclk_low();
+  swdio_output();
 }
 
 static inline void pulse_clock() {
@@ -112,9 +154,9 @@ static inline void line_idle_cycles_low(uint32_t cycles);
 // (Keep unused to avoid warnings on some builds.)
 // static inline void swd_line_idle_cycles(uint32_t cycles) { line_idle_cycles(cycles); }
 
-static bool dp_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out, bool log_enable);
-static bool dp_write(uint8_t addr, uint32_t val, uint8_t *ack_out, bool log_enable);
-static bool ap_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out, bool log_enable);
+static bool dp_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out, bool log_enable, bool post_idle);
+static bool dp_write(uint8_t addr, uint32_t val, uint8_t *ack_out, bool log_enable, bool post_idle);
+static bool ap_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out, bool log_enable, bool post_idle);
 static bool ap_write(uint8_t addr, uint32_t val, uint8_t *ack_out, bool log_enable);
 
 static const char *dp_reg_name_read(uint8_t addr) {
@@ -253,7 +295,7 @@ static inline uint8_t make_request(uint8_t apndp, uint8_t rnw, uint8_t addr) {
   return req;
 }
 
-static bool dp_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out, bool log_enable) {
+static bool dp_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out, bool log_enable, bool post_idle) {
   const uint8_t req = make_request(/*APnDP=*/0, /*RnW=*/1, addr);
 
   (void)req; // request byte is not printed (not useful for humans)
@@ -300,7 +342,7 @@ static bool dp_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out, bool log_
     // target releases on , host takes ownership 1.5 cycles later on .
     pulse_clock();
     pulse_clock();
-    line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
+    if (post_idle) line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
     return false;
   }
 
@@ -326,7 +368,7 @@ static bool dp_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out, bool log_
       Serial.printf("SWD DP READ  addr=0x%02X  PARITY FAIL  p_rx=%u p_calc=%u data=0x%08lX\n", (unsigned)addr,
                     (unsigned)p_rx, (unsigned)parity_u32(v), (unsigned long)v);
     }
-    line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
+    if (post_idle) line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
     return false;
   }
 
@@ -340,11 +382,11 @@ static bool dp_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out, bool log_
     Serial.printf("%s (DP READ %s addr=0x%02X, data=0x%08lX, ACK=%u %s)\n", dp_read_purpose(addr),
                   dp_reg_name_read(addr), (unsigned)addr, (unsigned long)v, (unsigned)ack, ack_to_str(ack));
   }
-  line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
+  if (post_idle) line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
   return true;
 }
 
-static bool dp_write(uint8_t addr, uint32_t val, uint8_t *ack_out, bool log_enable) {
+static bool dp_write(uint8_t addr, uint32_t val, uint8_t *ack_out, bool log_enable, bool post_idle) {
   const uint8_t req = make_request(/*APnDP=*/0, /*RnW=*/0, addr);
 
   (void)req; // request byte is not printed (not useful for humans)
@@ -381,7 +423,7 @@ static bool dp_write(uint8_t addr, uint32_t val, uint8_t *ack_out, bool log_enab
   if (ack != ACK_OK) {
     pulse_clock();
     pulse_clock();
-    line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
+    if (post_idle) line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
     return false;
   }
 
@@ -402,11 +444,11 @@ static bool dp_write(uint8_t addr, uint32_t val, uint8_t *ack_out, bool log_enab
     Serial.printf("%s (DP WRITE %s addr=0x%02X, data=0x%08lX, ACK=%u %s)\n", dp_write_purpose(addr, val),
                   dp_reg_name_write(addr), (unsigned)addr, (unsigned long)val, (unsigned)ack, ack_to_str(ack));
   }
-  line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
+  if (post_idle) line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
   return true;
 }
 
-static bool ap_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out, bool log_enable) {
+static bool ap_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out, bool log_enable, bool post_idle) {
   // AP reads are posted; caller should read DP RDBUFF to get the value.
   // We'll perform AP read request, then DP RDBUFF read.
   const uint8_t req = make_request(/*APnDP=*/1, /*RnW=*/1, addr);
@@ -432,7 +474,7 @@ static bool ap_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out, bool log_
   if (ack != ACK_OK) {
     pulse_clock();
     pulse_clock();
-    line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
+    if (post_idle) line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
     return false;
   }
 
@@ -459,7 +501,7 @@ static bool ap_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out, bool log_
       Serial.printf("SWD AP READ  addr=0x%02X  PARITY FAIL  p_rx=%u p_calc=%u data=0x%08lX\n", (unsigned)addr,
                     (unsigned)p_rx, (unsigned)parity_u32(v), (unsigned long)v);
     }
-    line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
+    if (post_idle) line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
     return false;
   }
 
@@ -475,7 +517,7 @@ static bool ap_read(uint8_t addr, uint32_t *val_out, uint8_t *ack_out, bool log_
     Serial.printf("%s (AP READ %s addr=0x%02X, data(stale)=0x%08lX, ACK=%u %s)\n", ap_read_purpose(addr),
                   ap_reg_name(addr), (unsigned)addr, (unsigned long)v, (unsigned)ack, ack_to_str(ack));
   }
-  line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
+  if (post_idle) line_idle_cycles_low(SWD_POST_IDLE_LOW_CYCLES);
   return true;
 }
 
@@ -534,6 +576,10 @@ static bool ap_write(uint8_t addr, uint32_t val, uint8_t *ack_out, bool log_enab
   return ap_write_internal(addr, val, ack_out, log_enable, /*post_idle=*/true);
 }
 
+static bool ap_write_fast(uint8_t addr, uint32_t val, uint8_t *ack_out) {
+  return ap_write_internal(addr, val, ack_out, /*log_enable=*/false, /*post_idle=*/false);
+}
+
 void begin(const Pins &pins) {
   g_pins = pins;
 
@@ -579,6 +625,8 @@ bool nrst_is_high() {
 }
 
 void reset_and_switch_to_swd() {
+  ensure_swd_pin_modes();
+
   // Hold target in reset during SWD attach. This matches ST-LINK/V2 behavior observed
   // on the bench (NRST held low across the early SWD connect + initial transactions).
   set_nrst(true);
@@ -597,6 +645,8 @@ void reset_and_switch_to_swd() {
 }
 
 void swd_line_reset() {
+  ensure_swd_pin_modes();
+
   // Perform SWD line reset + JTAG-to-SWD sequence WITHOUT touching NRST.
   // This is used to re-establish SWD communication after releasing NRST,
   // because on STM32G0 the system reset (NRST release) clears the DP/AP state.
@@ -614,6 +664,8 @@ void swd_line_reset() {
 }
 
 bool connect_under_reset_and_init() {
+  ensure_swd_pin_modes();
+
   // "Connect under reset" sequence for targets that may disable SWD pins quickly.
   // This keeps SWD activity going while releasing NRST, then aggressively tries
   // to re-establish communication.
@@ -647,7 +699,7 @@ bool connect_under_reset_and_init() {
     uint32_t idcode = 0;
     uint8_t ack = 0;
     // Log this read in human format when verbose is enabled.
-    if (dp_read(DP_ADDR_IDCODE, &idcode, &ack, /*log_enable=*/g_verbose) && ack == ACK_OK) {
+    if (dp_read(DP_ADDR_IDCODE, &idcode, &ack, /*log_enable=*/g_verbose, /*post_idle=*/true) && ack == ACK_OK) {
       if (g_verbose) {
         Serial.printf("Re-connect success on attempt %d (DP IDCODE=0x%08lX)\n", attempt + 1, (unsigned long)idcode);
       }
@@ -685,17 +737,17 @@ bool attach_and_read_idcode(uint32_t *idcode_out, uint8_t *ack_out) {
 bool read_idcode(uint32_t *idcode_out, uint8_t *ack_out) {
   // DP IDCODE is at address 0x00.
   // We treat this as a low-level primitive; callers decide whether to log.
-  return dp_read(/*addr=*/0x00, idcode_out, ack_out, /*log_enable=*/false);
+  return dp_read(/*addr=*/0x00, idcode_out, ack_out, /*log_enable=*/false, /*post_idle=*/true);
 }
 
 bool dp_read_reg(uint8_t addr, uint32_t *val_out, uint8_t *ack_out) {
   // Low-level primitive; callers decide whether to log.
-  return dp_read(addr, val_out, ack_out, /*log_enable=*/false);
+  return dp_read(addr, val_out, ack_out, /*log_enable=*/false, /*post_idle=*/true);
 }
 
 bool dp_write_reg(uint8_t addr, uint32_t val, uint8_t *ack_out) {
   // Low-level primitive; callers decide whether to log.
-  return dp_write(addr, val, ack_out, /*log_enable=*/false);
+  return dp_write(addr, val, ack_out, /*log_enable=*/false, /*post_idle=*/true);
 }
 
 bool dp_init_and_power_up() {
@@ -714,21 +766,22 @@ bool dp_init_and_power_up() {
   {
     uint8_t ack = 0;
     uint32_t idcode = 0;
-    (void)dp_read(DP_ADDR_IDCODE, &idcode, &ack, /*log_enable=*/g_verbose);
+    (void)dp_read(DP_ADDR_IDCODE, &idcode, &ack, /*log_enable=*/g_verbose, /*post_idle=*/true);
   }
 
   // Clear sticky errors: write ABORT with STKCMPCLR/STKERRCLR/WDERRCLR/ORUNERRCLR
   // (bits 0..4: ORUNERRCLR=4, WDERRCLR=3, STKERRCLR=2, STKCMPCLR=1)
   {
     uint8_t ack = 0;
-    (void)dp_write(DP_ADDR_ABORT, (1u << 4) | (1u << 3) | (1u << 2) | (1u << 1), &ack, /*log_enable=*/g_verbose);
+    (void)dp_write(DP_ADDR_ABORT, (1u << 4) | (1u << 3) | (1u << 2) | (1u << 1), &ack, /*log_enable=*/g_verbose,
+                   /*post_idle=*/true);
   }
 
   // Power up request: CSYSPWRUPREQ (bit30) + CDBGPWRUPREQ (bit28)
   const uint32_t req = (1u << 30) | (1u << 28);
   {
     uint8_t ack = 0;
-    if (!dp_write(DP_ADDR_CTRLSTAT, req, &ack, /*log_enable=*/g_verbose)) {
+    if (!dp_write(DP_ADDR_CTRLSTAT, req, &ack, /*log_enable=*/g_verbose, /*post_idle=*/true)) {
       if (g_verbose) {
         Serial.printf("DP power-up request failed (DP WRITE CTRL/STAT addr=0x%02X, data=0x%08lX, ACK=%u %s)\n",
                       (unsigned)DP_ADDR_CTRLSTAT, (unsigned long)req, (unsigned)ack, ack_to_str(ack));
@@ -743,7 +796,7 @@ bool dp_init_and_power_up() {
   for (int i = 0; i < 200; i++) {
     uint32_t cs = 0;
     uint8_t ack = 0;
-    if (!dp_read(DP_ADDR_CTRLSTAT, &cs, &ack, /*log_enable=*/false)) {
+    if (!dp_read(DP_ADDR_CTRLSTAT, &cs, &ack, /*log_enable=*/false, /*post_idle=*/true)) {
       if (g_verbose && i < 10) {
         Serial.printf(
             "Poll CTRL/STAT failed (poll %d: DP READ CTRL/STAT addr=0x%02X, ACK=%u %s)\n", i,
@@ -780,20 +833,20 @@ bool ap_select(uint8_t apsel, uint8_t apbanksel) {
   const uint32_t sel = ((uint32_t)apsel << 24) | ((uint32_t)(apbanksel & 0xFu) << 4);
 
   // Log in the requested one-line English format when verbose is enabled.
-  return dp_write(DP_ADDR_SELECT, sel, nullptr, /*log_enable=*/g_verbose);
+  return dp_write(DP_ADDR_SELECT, sel, nullptr, /*log_enable=*/g_verbose, /*post_idle=*/true);
 }
 
 bool ap_read_reg(uint8_t addr, uint32_t *val_out, uint8_t *ack_out) {
   uint32_t dummy = 0;
   uint8_t ack0 = 0;
-  if (!ap_read(addr, &dummy, &ack0, /*log_enable=*/false)) {
+  if (!ap_read(addr, &dummy, &ack0, /*log_enable=*/false, /*post_idle=*/true)) {
     if (ack_out) *ack_out = ack0;
     return false;
   }
   // True value in RDBUFF
   uint8_t ack1 = 0;
   uint32_t v = 0;
-  if (!dp_read(DP_ADDR_RDBUFF, &v, &ack1, /*log_enable=*/false)) {
+  if (!dp_read(DP_ADDR_RDBUFF, &v, &ack1, /*log_enable=*/false, /*post_idle=*/true)) {
     if (ack_out) *ack_out = ack1;
     return false;
   }
@@ -811,11 +864,66 @@ bool ap_write_reg(uint8_t addr, uint32_t val, uint8_t *ack_out) {
   return ok;
 }
 
+bool ap_write_reg_fast(uint8_t addr, uint32_t val, uint8_t *ack_out) {
+  uint8_t ack = 0;
+  const bool ok = ap_write_fast(addr, val, &ack);
+  if (ack_out) *ack_out = ack;
+  return ok;
+}
+
 bool ap_write_reg_critical(uint8_t addr, uint32_t val, uint8_t *ack_out) {
   uint8_t ack = 0;
   const bool ok = ap_write_internal(addr, val, &ack, /*log_enable=*/false, /*post_idle=*/false);
   if (ack_out) *ack_out = ack;
   return ok;
+}
+
+bool AhbApSession::begin() {
+  // AHB-AP CSW value used throughout this repo.
+  const uint32_t CSW_32_INC = 0x23000012u;
+  tar_valid_ = false;
+
+  if (!ap_select(/*apsel=*/0, /*apbanksel=*/0)) return false;
+  if (!ap_write_reg_fast(AP_ADDR_CSW, CSW_32_INC, nullptr)) return false;
+  return true;
+}
+
+void AhbApSession::invalidate() {
+  tar_valid_ = false;
+  tar_ = 0;
+}
+
+bool AhbApSession::write32(uint32_t addr, uint32_t val) {
+  // If sequential, TAR can be left untouched because CSW has AddrInc=single.
+  if (!tar_valid_ || addr != tar_) {
+    if (!ap_write_reg_fast(AP_ADDR_TAR, addr, nullptr)) return false;
+    tar_ = addr;
+    tar_valid_ = true;
+  }
+  if (!ap_write_reg_fast(AP_ADDR_DRW, val, nullptr)) return false;
+  tar_ += 4;
+  return true;
+}
+
+bool AhbApSession::read32(uint32_t addr, uint32_t *val_out) {
+  if (!tar_valid_ || addr != tar_) {
+    if (!ap_write_reg_fast(AP_ADDR_TAR, addr, nullptr)) return false;
+    tar_ = addr;
+    tar_valid_ = true;
+  }
+
+  // Posted read sequence optimized for bulk polling:
+  // - skip post-idle flush clocks on both transactions
+  uint32_t stale = 0;
+  uint8_t ack0 = 0;
+  if (!ap_read(AP_ADDR_DRW, &stale, &ack0, /*log_enable=*/false, /*post_idle=*/false)) return false;
+
+  uint32_t v = 0;
+  uint8_t ack1 = 0;
+  if (!dp_read(DP_ADDR_RDBUFF, &v, &ack1, /*log_enable=*/false, /*post_idle=*/false)) return false;
+  if (val_out) *val_out = v;
+  tar_ += 4;
+  return true;
 }
 
 bool mem_write32(uint32_t addr, uint32_t val) {
@@ -898,7 +1006,7 @@ bool mem_read32_verbose(const char *purpose, uint32_t addr, uint32_t *val_out) {
 
   // Start the posted read from DRW.
   uint32_t stale = 0;
-  if (!ap_read(AP_ADDR_DRW, &stale, &ack, /*log_enable=*/false)) return false;
+  if (!ap_read(AP_ADDR_DRW, &stale, &ack, /*log_enable=*/false, /*post_idle=*/true)) return false;
   if (g_verbose) {
     Serial.printf(
         "%s: Start a posted memory read (AP READ DRW addr=0x%02X, data(stale)=0x%08lX, ACK=%u %s)\n", p,
@@ -907,7 +1015,7 @@ bool mem_read32_verbose(const char *purpose, uint32_t addr, uint32_t *val_out) {
 
   // Fetch the true value via DP.RDBUFF.
   uint32_t v = 0;
-  if (!dp_read(DP_ADDR_RDBUFF, &v, &ack, /*log_enable=*/false)) return false;
+  if (!dp_read(DP_ADDR_RDBUFF, &v, &ack, /*log_enable=*/false, /*post_idle=*/true)) return false;
   if (g_verbose) {
     Serial.printf("%s: Fetch posted-read result (DP READ RDBUFF addr=0x%02X, data=0x%08lX, ACK=%u %s)\n", p,
                   (unsigned)DP_ADDR_RDBUFF, (unsigned long)v, (unsigned)ack, ack_to_str(ack));

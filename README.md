@@ -139,9 +139,25 @@ In this edge-only model, the only legal SWDIO transitions are:
           - `b` DP ABORT write test (writes DP[0x00]=0x1E under NRST low then high)
           - `r` read first 8 bytes of target flash @ `0x08000000`
           - `e` mass erase (connect-under-reset recovery method)
-         - `w` write embedded firmware
-         - `v` verify embedded firmware
-         - `a` all (connect+halt, erase, write, verify)
+         - `w` write embedded firmware (prints a timing benchmark)
+          - `v` verify embedded firmware
+          - `a` all (connect+halt, erase, write, verify)
+
+## Performance / benchmarking
+
+The `w` command prints a simple on-device benchmark so you can track programming speed improvements.
+
+- It temporarily disables SWD verbose logging (see [`swd_min::set_verbose()`](src/swd_min.cpp:14)), because Serial printing can dominate runtime.
+- It reports:
+  - connect time
+  - program time
+  - total time
+  - a rough throughput estimate (KiB/s over the program phase)
+
+Implementation details:
+
+- Flash busy polling for programming uses microsecond-scale backoff instead of `delay(1)`.
+- Bulk programming uses an AHB-AP “session” to avoid re-writing `SELECT/CSW/TAR` for every 32-bit access (major SWD traffic reduction).
 
 ## Known current limitations (bench)
 

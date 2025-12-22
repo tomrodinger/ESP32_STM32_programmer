@@ -74,13 +74,25 @@ static constexpr uint32_t FLASH_KEY2 = 0xCDEF89ABu;
   static constexpr uint32_t FLASH_CR_STRT = (1u << 16);
   static constexpr uint32_t FLASH_CR_LOCK = (1u << 31);
 
-static bool wait_flash_not_busy(uint32_t timeout_ms) {
-  const uint32_t start = millis();
-  while ((millis() - start) < timeout_ms) {
+static bool wait_flash_not_busy(uint32_t timeout_ms, swd_min::AhbApSession *s = nullptr) {
+  // IMPORTANT: A 1ms delay inside this polling loop makes programming extremely slow
+  // because per-doubleword flash programming busy time is typically far below 1ms.
+  // Use microsecond-scale backoff for short operations.
+  const uint32_t start_us = micros();
+  const uint32_t timeout_us = timeout_ms * 1000u;
+
+  while ((uint32_t)(micros() - start_us) < timeout_us) {
     uint32_t sr = 0;
-    if (!swd_min::mem_read32(FLASH_SR, &sr)) return false;
+    const bool ok = s ? s->read32(FLASH_SR, &sr) : swd_min::mem_read32(FLASH_SR, &sr);
+    if (!ok) return false;
     if ((sr & FLASH_SR_BSY) == 0) return true;
-    delay(1);
+
+    // Backoff tuned by expected operation duration.
+    if (timeout_ms >= 1000u) {
+      delay(1);
+    } else {
+      delayMicroseconds(50);
+    }
   }
   return false;
 }
@@ -102,11 +114,33 @@ static bool flash_unlock() {
   return true;
 }
 
+static bool flash_unlock_fast(swd_min::AhbApSession &ap) {
+  uint32_t cr = 0;
+  if (!ap.read32(FLASH_CR, &cr)) return false;
+  if ((cr & FLASH_CR_LOCK) == 0) return true;
+
+  Serial.println("FLASH_CR locked; unlocking...");
+  if (!ap.write32(FLASH_KEYR, FLASH_KEY1)) return false;
+  if (!ap.write32(FLASH_KEYR, FLASH_KEY2)) return false;
+
+  if (!ap.read32(FLASH_CR, &cr)) return false;
+  if (cr & FLASH_CR_LOCK) {
+    Serial.println("ERROR: Flash unlock failed (LOCK still set)");
+    return false;
+  }
+  return true;
+}
+
 static bool flash_clear_sr_flags(uint32_t mask) {
   // STM32G0: FLASH_SR flags are W1C (write 1 to clear) per ST HAL
   // See: [`FLASH_ERASE.md`](FLASH_ERASE.md:110) and [`docs/stm32g0xx_hal_flash.h`](docs/stm32g0xx_hal_flash.h:786)
   if ((mask & FLASH_SR_CLEAR_MASK) == 0) return true;
   return swd_min::mem_write32(FLASH_SR, mask & FLASH_SR_CLEAR_MASK);
+}
+
+static bool flash_clear_sr_flags_fast(swd_min::AhbApSession &ap, uint32_t mask) {
+  if ((mask & FLASH_SR_CLEAR_MASK) == 0) return true;
+  return ap.write32(FLASH_SR, mask & FLASH_SR_CLEAR_MASK);
 }
 
 static bool flash_clear_cr_bits(uint32_t mask) {
@@ -424,21 +458,41 @@ bool flash_mass_erase_under_reset() {
 bool flash_program(uint32_t addr, const uint8_t *data, uint32_t len) {
   if (!data || len == 0) return true;
 
-  if (!wait_flash_not_busy(/*timeout_ms=*/5000)) {
+  swd_min::AhbApSession ap;
+  if (!ap.begin()) {
+    Serial.println("ERROR: AHB-AP session init failed");
+    return false;
+  }
+
+  if (!wait_flash_not_busy(/*timeout_ms=*/5000, &ap)) {
     Serial.println("ERROR: flash busy timeout before program");
     return false;
   }
-  if (!flash_unlock()) return false;
+  if (!flash_unlock_fast(ap)) return false;
+
+  // Clear completion + error flags once before starting the program operation.
+  if (!flash_clear_sr_flags_fast(ap, FLASH_SR_CLEAR_MASK)) {
+    Serial.println("ERROR: failed to clear FLASH_SR flags before program");
+    return false;
+  }
 
   Serial.printf("Programming %lu bytes at 0x%08lX...\n", (unsigned long)len, (unsigned long)addr);
 
   // STM32G0 supports 64-bit (double word) programming. We'll write as two 32-bit words.
   // Length must be a multiple of 8 for clean programming; pad with 0xFF if needed.
 
+  // Keep PG set for the whole programming loop.
+  // This avoids two FLASH_CR accesses per doubleword (set/clear) which is very costly over bit-banged SWD.
+  {
+    uint32_t cr = 0;
+    if (!ap.read32(FLASH_CR, &cr)) return false;
+    cr &= ~(FLASH_CR_PER | FLASH_CR_MER1);
+    cr |= FLASH_CR_PG;
+    if (!ap.write32(FLASH_CR, cr)) return false;
+  }
+
   uint32_t i = 0;
   while (i < len) {
-    // Set PG
-    if (!swd_min::mem_write32(FLASH_CR, FLASH_CR_PG)) return false;
 
     uint8_t chunk[8] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
     const uint32_t remaining = len - i;
@@ -450,20 +504,29 @@ bool flash_program(uint32_t addr, const uint8_t *data, uint32_t len) {
     memcpy(&w1, &chunk[4], 4);
 
     // Write 64-bit payload
-    if (!swd_min::mem_write32(addr + i + 0, w0)) return false;
-    if (!swd_min::mem_write32(addr + i + 4, w1)) return false;
+    if (!ap.write32(addr + i + 0, w0)) return false;
+    if (!ap.write32(addr + i + 4, w1)) return false;
 
-    if (!wait_flash_not_busy(/*timeout_ms=*/50)) {
+    if (!wait_flash_not_busy(/*timeout_ms=*/10, &ap)) {
       Serial.printf("ERROR: flash busy timeout at offset 0x%lX\n", (unsigned long)i);
       return false;
     }
 
-    // Clear PG
-    if (!flash_clear_cr_bits(FLASH_CR_PG)) return false;
-
     if ((i % 1024u) == 0) Serial.print('.');
     i += 8;
   }
+
+  // Clear PG and lock flash.
+  {
+    uint32_t cr = 0;
+    if (!ap.read32(FLASH_CR, &cr)) return false;
+    cr &= ~FLASH_CR_PG;
+    cr |= FLASH_CR_LOCK;
+    if (!ap.write32(FLASH_CR, cr)) return false;
+  }
+
+  // Clear completion + error flags after programming.
+  (void)flash_clear_sr_flags_fast(ap, FLASH_SR_CLEAR_MASK);
 
   Serial.println("\nProgram done");
   return true;

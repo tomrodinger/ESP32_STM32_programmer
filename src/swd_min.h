@@ -99,10 +99,30 @@ bool ap_select(uint8_t apsel, uint8_t apbanksel);
 bool ap_read_reg(uint8_t addr, uint32_t *val_out, uint8_t *ack_out = nullptr);
 bool ap_write_reg(uint8_t addr, uint32_t val, uint8_t *ack_out = nullptr);
 
+// AP write variant optimized for bulk transfers:
+// - no post-transfer idle/flush clocks
+// - no human logging
+// Intended for performance-critical loops (e.g. flash programming).
+bool ap_write_reg_fast(uint8_t addr, uint32_t val, uint8_t *ack_out = nullptr);
+
 // Critical-window AP write: performs a single AP write with minimal post-transaction
 // overhead (no post-idle cycles, no human logging). Intended for the first DHCSR halt
 // write right after NRST release.
 bool ap_write_reg_critical(uint8_t addr, uint32_t val, uint8_t *ack_out = nullptr);
+
+// Lightweight AHB-AP session that avoids re-writing SELECT/CSW/TAR on every 32-bit access.
+// This is a major performance win for flash programming where accesses are sequential.
+struct AhbApSession {
+  bool begin();
+  void invalidate();
+
+  bool write32(uint32_t addr, uint32_t val);
+  bool read32(uint32_t addr, uint32_t *val_out);
+
+ private:
+  bool tar_valid_ = false;
+  uint32_t tar_ = 0;
+};
 
 // AHB-AP memory access helpers (32-bit).
 bool mem_write32(uint32_t addr, uint32_t val);

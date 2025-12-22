@@ -23,6 +23,7 @@ static void print_help() {
   Serial.println("  r = read first 8 bytes of target flash @ 0x08000000");
   Serial.println("  e = erase entire flash (mass erase; connect-under-reset recovery method)");
   Serial.println("  w = write firmware to flash");
+  Serial.println("      (prints a simple benchmark: connect/program/total time)");
   Serial.println("  v = verify firmware in flash (dumps bytes read + mismatch count)");
   Serial.println("  a = all: connect+halt, erase, write, verify");
 }
@@ -83,8 +84,36 @@ static bool cmd_erase() {
 }
 
 static bool cmd_write() {
-  if (!cmd_connect()) return false;
-  const bool ok = stm32g0_prog::flash_program(stm32g0_prog::FLASH_BASE, firmware_bin, firmware_bin_len);
+  // Benchmark 'w' without changing SWD clock:
+  // - keep existing verbose setting for connect reliability
+  // - disable verbose only during programming (Serial prints dominate runtime)
+  // - measure connect + program + total
+  const bool prev_verbose = swd_min::verbose_enabled();
+
+  const uint32_t t0 = millis();
+  const bool connect_ok = stm32g0_prog::connect_and_halt();
+  const uint32_t t1 = millis();
+
+  bool prog_ok = false;
+  if (connect_ok) {
+    swd_min::set_verbose(false);
+    prog_ok = stm32g0_prog::flash_program(stm32g0_prog::FLASH_BASE, firmware_bin, firmware_bin_len);
+    swd_min::set_verbose(prev_verbose);
+  }
+  const uint32_t t2 = millis();
+
+  const uint32_t ms_connect = t1 - t0;
+  const uint32_t ms_program = t2 - t1;
+  const uint32_t ms_total = t2 - t0;
+
+  // Throughput estimate (payload bytes / programming time). Avoid div by zero.
+  const float prog_s = (ms_program > 0) ? (ms_program / 1000.0f) : 0.0001f;
+  const float kbps = (firmware_bin_len / 1024.0f) / prog_s;
+
+  Serial.printf("Benchmark w: connect=%lums program=%lums total=%lums (%.2f KiB/s over program phase)\n",
+                (unsigned long)ms_connect, (unsigned long)ms_program, (unsigned long)ms_total, (double)kbps);
+
+  const bool ok = connect_ok && prog_ok;
   Serial.println(ok ? "Write OK" : "Write FAIL");
   return ok;
 }
