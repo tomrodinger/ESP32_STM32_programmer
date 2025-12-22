@@ -6,8 +6,28 @@
 
 static const swd_min::Pins PINS(35, 36, 37);
 
+// Production jig button:
+// - GPIO46 configured as INPUT_PULLUP
+// - external button pulls to GND when pressed
+static constexpr int k_prod_button_pin = 46;
+static constexpr uint32_t k_button_debounce_ms = 30;
+
+// Forward declarations (used by production sequence helper).
+static bool cmd_erase();
+static bool cmd_write();
+static bool cmd_verify();
+
 static void print_user_pressed_banner(char c) {
-  Serial.printf("=== User pressed %c ========================\n", c);
+  if (c == ' ') {
+    Serial.println("=== User pressed <space> (0x20) ========================");
+    return;
+  }
+  // Print both the character (when printable) and the raw byte value for debugging.
+  if (c >= 32 && c <= 126) {
+    Serial.printf("=== User pressed '%c' (0x%02X) ========================\n", c, (unsigned char)c);
+  } else {
+    Serial.printf("=== User pressed 0x%02X ========================\n", (unsigned char)c);
+  }
 }
 
 static void print_help() {
@@ -26,6 +46,10 @@ static void print_help() {
   Serial.println("      (prints a simple benchmark: connect/program/total time)");
   Serial.println("  v = verify firmware in flash (FAST; prints benchmark + mismatch count)");
   Serial.println("  a = all: connect+halt, erase, write, verify");
+  Serial.println("  <space> = PRODUCTION: run e -> w -> v -> R (fail-fast; stops at first error)");
+  Serial.println("Production jig:");
+  Serial.printf("  Button on GPIO%d (INPUT_PULLUP) pulls to GND when pressed -> runs <space> sequence\n",
+                k_prod_button_pin);
 }
 
 static void cmd_reset_pulse_run() {
@@ -49,6 +73,53 @@ static void cmd_reset_pulse_run() {
 
   // After reset, avoid continuing to drive SWD lines; target firmware may repurpose them.
   swd_min::release_swd_pins();
+}
+
+static bool cmd_reset_pulse_run_strict() {
+  // Strict variant intended for production sequence:
+  // if the SWD prep fails, treat it as a hard failure and do not proceed.
+  Serial.println("Preparing target for normal run (clear C_HALT + clear VC_CORERESET)...");
+  const bool prep_ok = stm32g0_prog::prepare_target_for_normal_run();
+  if (!prep_ok) {
+    Serial.println("ERROR: Prep for run failed; not pulsing NRST");
+    return false;
+  }
+
+  Serial.println("Pulsing NRST LOW for 2ms, then releasing HIGH...");
+  swd_min::set_nrst(true);
+  delay(2);
+  swd_min::set_nrst(false);
+
+  // After reset, avoid continuing to drive SWD lines; target firmware may repurpose them.
+  swd_min::release_swd_pins();
+  return true;
+}
+
+static bool run_production_sequence(const char *source) {
+  Serial.println("========================================");
+  Serial.printf("PRODUCTION sequence triggered by %s\n", source);
+  Serial.println("Sequence: e -> w -> v -> R (fail-fast)");
+  Serial.println("----------------------------------------");
+
+  if (!cmd_erase()) {
+    Serial.println("ERROR: Production sequence aborted at step 'e' (erase)");
+    return false;
+  }
+  if (!cmd_write()) {
+    Serial.println("ERROR: Production sequence aborted at step 'w' (write)");
+    return false;
+  }
+  if (!cmd_verify()) {
+    Serial.println("ERROR: Production sequence aborted at step 'v' (verify)");
+    return false;
+  }
+  if (!cmd_reset_pulse_run_strict()) {
+    Serial.println("ERROR: Production sequence aborted at step 'R' (run)");
+    return false;
+  }
+
+  Serial.println("PRODUCTION sequence SUCCESS");
+  return true;
 }
 
 static bool print_idcode_attempt() {
@@ -285,6 +356,8 @@ void setup() {
 
   swd_min::begin(PINS);
 
+  pinMode(k_prod_button_pin, INPUT_PULLUP);
+
   Serial.printf("SWD verbose: %s (default)\n", swd_min::verbose_enabled() ? "ON" : "OFF");
   Serial.printf("Initial NRST state (driven by ESP32): %s\n", swd_min::nrst_is_high() ? "HIGH" : "LOW");
 
@@ -296,6 +369,38 @@ void setup() {
 }
 
 void loop() {
+  // --- Production button handling (runs even if no Serial activity) ---
+  static bool button_raw_last = true;     // pull-up => HIGH when released
+  static bool button_stable = true;
+  static uint32_t button_last_change_ms = 0;
+  static bool button_armed = true;        // re-arm once released
+
+  const bool raw = (digitalRead(k_prod_button_pin) != LOW);
+  const uint32_t now_ms = millis();
+
+  if (raw != button_raw_last) {
+    button_raw_last = raw;
+    button_last_change_ms = now_ms;
+  }
+
+  if ((uint32_t)(now_ms - button_last_change_ms) >= k_button_debounce_ms) {
+    if (button_stable != raw) {
+      button_stable = raw;
+
+      // Falling edge (released->pressed): stable goes HIGH->LOW.
+      if (!button_stable && button_armed) {
+        button_armed = false;
+        run_production_sequence("GPIO46 button");
+      }
+
+      // Re-arm after release.
+      if (button_stable) {
+        button_armed = true;
+      }
+    }
+  }
+
+  // --- Serial command handling ---
   if (!Serial.available()) {
     delay(10);
     return;
@@ -304,13 +409,18 @@ void loop() {
   const char c = (char)Serial.read();
 
   // Ignore whitespace/newlines from terminal.
-  if (c == '\n' || c == '\r' || c == ' ') {
+  // NOTE: Space is a real command (<space>) used for production programming.
+  if (c == '\n' || c == '\r') {
     return;
   }
 
   print_user_pressed_banner(c);
 
   switch (c) {
+    case ' ':
+      run_production_sequence("Serial <space>");
+      break;
+
     case 'h':
     case '?':
       print_help();

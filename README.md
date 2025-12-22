@@ -33,11 +33,11 @@ The project is built using **PlatformIO** with the **Arduino** framework.
 
 ### Key Components
 
-1.  **`src/swd.cpp` / `src/swd.h`**:
+1.  **`src/swd_min.cpp` / `src/swd_min.h`**:
     -   Implements the low-level SWD protocol (bit-banging).
     -   Handles SWD initialization, reset sequences, and DP/AP register read/write operations.
 
-2.  **`src/stm32g0.cpp` / `src/stm32g0.h`**:
+2.  **`src/stm32g0_prog.cpp` / `src/stm32g0_prog.h`**:
     -   Implements high-level STM32G0 specific flash operations.
     -   **Unlock**: Unlocks the flash memory using the STM32G0 key sequence.
     -   **Mass Erase**: Erases the entire flash memory.
@@ -50,8 +50,8 @@ The project is built using **PlatformIO** with the **Arduino** framework.
 
 4.  **`src/main.cpp`**:
     -   Provides a Serial interface (115200 baud).
-    -   Waits for the user to send the character **'p'** to start the programming process.
-    -   **Heartbeat**: The built-in LED (if available) blinks every 2 seconds, and "Waiting for 'p'..." is printed to Serial to indicate the board is running.
+    -   Implements a small command console over Serial.
+    -   Includes a **production/jig trigger**: a physical button on **GPIO46** runs the production programming sequence.
 
 ## Current status (as of this commit)
 
@@ -76,6 +76,7 @@ End-to-end programming should follow this sequence (both on hardware and in the 
 - SWD host bit-bang + DP/AP + AHB memory access helpers: [`src/swd_min.cpp`](src/swd_min.cpp:1), [`src/swd_min.h`](src/swd_min.h:1)
 - STM32G0 flash algorithms (unlock, mass erase, 64-bit programming, verify): [`src/stm32g0_prog.cpp`](src/stm32g0_prog.cpp:1), [`src/stm32g0_prog.h`](src/stm32g0_prog.h:1)
 - ESP32 serial command harness (commands: `i/e/w/v/a`): [`src/main.cpp`](src/main.cpp:1)
+- ESP32 serial command harness (commands include production `<space>`): [`src/main.cpp`](src/main.cpp:1)
 - Simulator executable that runs the full flow and writes `signals.csv`: [`sim/main.cpp`](sim/main.cpp:1)
 - Waveform viewer (Plotly HTML): [`viewer/view_log.py`](viewer/view_log.py:1)
 
@@ -120,28 +121,46 @@ In this edge-only model, the only legal SWDIO transitions are:
   2.  **Build & Upload**:
      -   Build the project: `pio run`
      -   Upload to ESP32-S3: `pio run -t upload`
-  3.  **Run**:
-     -   Open the Serial Monitor: `pio device monitor` (baud rate 115200).
-     -   Reset the ESP32-S3.
-     -   You should see:
-        ```
-        ESP32-S3 STM32G0 Programmer
-        Firmware Size: 9220 bytes
-        Send 'p' to start programming...
-        ```
+   3.  **Run**:
+      -   Open the Serial Monitor: `pio device monitor` (baud rate 115200).
+      -   Reset the ESP32-S3.
       -   Use serial commands:
-          - `h` help
-          - `i` reset + read DP IDCODE
-          - `R` let firmware run: clear debug-halt state, pulse NRST (>=1ms low), then release SWD pins
-          - `d` toggle SWD verbose diagnostics (prints DP/AP/memory access details)
-          - `t` SWD smoke test (attempts DP power-up handshake + AHB-AP IDR read; may fail on current hardware)
-          - `c` DP CTRL/STAT single-write test (writes DP[0x04]=0x50000000; requires `i` first)
-          - `b` DP ABORT write test (writes DP[0x00]=0x1E under NRST low then high)
-          - `r` read first 8 bytes of target flash @ `0x08000000`
-          - `e` mass erase (connect-under-reset recovery method)
-          - `w` write embedded firmware (prints a timing benchmark)
+           - `h` help
+           - `i` reset + read DP IDCODE
+           - `R` let firmware run: clear debug-halt state, pulse NRST, then release SWD pins
+           - `d` toggle SWD verbose diagnostics (prints DP/AP/memory access details)
+           - `t` SWD smoke test (DP power-up handshake + AHB-AP IDR)
+           - `c` DP CTRL/STAT single-write test (DP[0x04]=0x50000000)
+           - `b` DP ABORT write test (ABORT=0x1E under NRST low then high)
+           - `p` read Program Counter (PC)
+           - `r` read first 8 bytes of target flash @ `0x08000000`
+           - `e` mass erase (connect-under-reset recovery method)
+           - `w` write embedded firmware (prints a timing benchmark)
            - `v` verify embedded firmware (FAST; prints a timing benchmark)
            - `a` all (connect+halt, erase, write, verify)
+           - `<space>` **PRODUCTION**: run `e -> w -> v -> R` (fail-fast; aborts on first error)
+
+## Production / jig mode
+
+The production programming flow is implemented as a single **fail-fast** sequence:
+
+`e` (erase) → `w` (write) → `v` (verify) → `R` (reset + release SWD so target firmware can run)
+
+Triggers:
+
+1. Press **Spacebar** in the Serial terminal/monitor (command `<space>`).
+2. Press a physical **jig button** connected to **GPIO46**.
+
+Note: ensure your serial terminal is configured to send keystrokes immediately (character mode). For automated testing,
+use [`tools/esp32_runner.py`](tools/esp32_runner.py:1) with `--space`.
+
+### GPIO46 jig button wiring
+
+- Configure: **GPIO46 = `INPUT_PULLUP`** in firmware (internal pull-up enabled)
+- Wire: **GPIO46 ↔ button ↔ GND**
+- Behavior: button press pulls GPIO46 LOW, triggering the production programming sequence.
+
+Implementation reference: button setup and debounce/edge-detect live in [`src/main.cpp`](src/main.cpp:1).
 
 ## Performance / benchmarking
 
@@ -207,7 +226,19 @@ pip install -r tools/requirements.txt
 python3 tools/esp32_runner.py -i -r
 ```
 
+Example: run the production `<space>` command (programming sequence):
+
+```bash
+python3 tools/esp32_runner.py --space --max 120 --quiet 1.0
+```
+
+### AI/automation testing requirement
+
+When making firmware changes in this repo, the expected validation workflow is:
+
+1. Build + upload + run a real command sequence using [`tools/esp32_runner.py`](tools/esp32_runner.py:1).
+2. Human verifies the observed output and (for production/jig features) validates any physical IO triggers.
+
 Notes:
 
-- Use `--port /dev/tty.usbmodemXXXX` if auto-detection chooses the wrong port.
 - The script prints the device output and exits.

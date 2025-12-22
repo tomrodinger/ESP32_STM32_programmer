@@ -39,7 +39,10 @@ except Exception as e:  # pragma: no cover
 # Keep in sync with the command table printed by the ESP32 firmware.
 # NOTE: We intentionally gate which commands can be sent to avoid accidental
 # destructive actions when iterating.
-ALLOWED_CMDS = set("hidbtcpermwva") | {"r", "p"}
+#
+# Production sequence is bound to the spacebar (ASCII 0x20). We support it via
+# the explicit `--space` flag (rather than a short `- ` option).
+ALLOWED_CMDS = set("hidbtcpermwva") | {"r", "p", " "}
 
 
 def _run(cmd: List[str]) -> None:
@@ -130,12 +133,22 @@ def _send_cmd_and_capture(ser: "serial.Serial", cmd_char: str, quiet_s: float, m
 
 
 def _parse_cmds(argv: List[str]) -> List[str]:
+    """Extract ordered command characters from argv.
+
+    Preserves ordering (left-to-right) to match how a human would type sequences.
+    """
+
     cmds: List[str] = []
     for a in argv:
+        if a == "--space":
+            cmds.append(" ")
+            continue
+
         if a.startswith("-") and not a.startswith("--") and len(a) == 2:
             c = a[1]
             if c in ALLOWED_CMDS:
                 cmds.append(c)
+
     return cmds
 
 
@@ -222,6 +235,7 @@ def _parse_args(argv: List[str]) -> Args:
                 "  --boot-wait S       Wait after opening port before sending commands (default: 2)\n"
                 "  --quiet S           Consider command done after S seconds of no output (default: 0.6)\n"
                 "  --max S             Max seconds to wait per command (default: 6)\n"
+                "  --space            Send the production <space> command (ASCII 0x20)\n"
             )
             raise SystemExit(0)
         i += 1
