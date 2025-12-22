@@ -119,6 +119,11 @@ struct AhbApSession {
   bool write32(uint32_t addr, uint32_t val);
   bool read32(uint32_t addr, uint32_t *val_out);
 
+  // Bulk sequential 32-bit reads optimized using AP posted-read pipelining.
+  // Reads `words` consecutive 32-bit words starting at `addr` into `out_words`.
+  // Returns false on any SWD transaction failure.
+  bool read32_pipelined(uint32_t addr, uint32_t *out_words, uint32_t words);
+
  private:
   bool tar_valid_ = false;
   uint32_t tar_ = 0;

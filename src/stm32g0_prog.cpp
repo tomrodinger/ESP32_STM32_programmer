@@ -206,6 +206,98 @@ bool connect_and_halt() {
   return true;
 }
 
+bool connect_and_halt_under_reset_recovery() {
+  // Production-oriented connect+halt flow.
+  //
+  // Rationale:
+  // Some target firmwares re-purpose SWD pins extremely quickly after reset.
+  // A "normal" connect flow can spend too long re-syncing/printing after NRST release.
+  //
+  // Strategy (same critical-window technique as [`flash_mass_erase_under_reset()`](src/stm32g0_prog.cpp:312)):
+  //  1) While NRST LOW: reset+SWD, DP init+power-up, pre-stage AHB-AP (CSW+TAR=DHCSR)
+  //  2) Release NRST and immediately write DHCSR halt in the critical window
+  //  3) Re-init DP and confirm core is halted
+
+  if (verbose()) {
+    Serial.println("Connect recovery: connect-under-reset + immediate halt...");
+  }
+
+  // Step 1: Assert reset and switch the debug port to SWD mode.
+  swd_min::reset_and_switch_to_swd();
+
+  // Step 2: DP init + power-up (NRST LOW).
+  if (!swd_min::dp_init_and_power_up()) {
+    Serial.println("ERROR: dp_init_and_power_up failed (NRST LOW)");
+    return false;
+  }
+
+  // Step 3: Best-effort arm halt-on-reset while NRST LOW.
+  (void)swd_min::mem_write32(DEMCR, DEMCR_VC_CORERESET);
+  (void)swd_min::mem_write32(DHCSR, DHCSR_C_DEBUGEN_C_HALT);
+
+  // Step 3b: Pre-stage AHB-AP so the next DRW write targets DHCSR.
+  if (!swd_min::ap_select(/*apsel=*/0, /*apbanksel=*/0)) {
+    Serial.println("ERROR: ap_select failed");
+    return false;
+  }
+
+  // Matches the AHB-AP CSW used by [`swd_min::mem_write32()`](src/swd_min.cpp:929).
+  static constexpr uint32_t CSW_32_INC = 0x23000012u;
+  uint8_t ack = 0;
+  if (!swd_min::ap_write_reg(swd_min::AP_ADDR_CSW, CSW_32_INC, &ack) || ack != swd_min::ACK_OK) {
+    Serial.printf("ERROR: AP CSW write failed, ACK=%u (%s)\n", (unsigned)ack, swd_min::ack_to_str(ack));
+    return false;
+  }
+  if (!swd_min::ap_write_reg(swd_min::AP_ADDR_TAR, DHCSR, &ack) || ack != swd_min::ACK_OK) {
+    Serial.printf("ERROR: AP TAR write failed, ACK=%u (%s)\n", (unsigned)ack, swd_min::ack_to_str(ack));
+    return false;
+  }
+
+  // Step 4: Critical window: release NRST and immediately write DHCSR halt.
+  swd_min::set_nrst_quiet(false);
+  uint8_t first_halt_ack = 0;
+  (void)swd_min::ap_write_reg_critical(swd_min::AP_ADDR_DRW, DHCSR_C_DEBUGEN_C_HALT, &first_halt_ack);
+
+  ack = first_halt_ack;
+  if (ack != swd_min::ACK_OK) {
+    for (int i = 0; i < 8; i++) {
+      (void)swd_min::ap_write_reg_critical(swd_min::AP_ADDR_DRW, DHCSR_C_DEBUGEN_C_HALT, &ack);
+      if (ack == swd_min::ACK_OK) break;
+    }
+  }
+
+  if (verbose()) {
+    Serial.printf("Immediate halt write ACK=%u (%s)\n", (unsigned)first_halt_ack, swd_min::ack_to_str(first_halt_ack));
+  }
+
+  delay(2);
+
+  // Step 5: DP init (NRST HIGH) - try without line reset first.
+  if (!swd_min::dp_init_and_power_up()) {
+    swd_min::swd_line_reset();
+    if (!swd_min::dp_init_and_power_up()) {
+      Serial.println("ERROR: dp_init_and_power_up failed (NRST HIGH)");
+      return false;
+    }
+  }
+
+  // Step 6: Force debug+halt and confirm S_HALT.
+  if (!swd_min::mem_write32(DHCSR, DHCSR_C_DEBUGEN_C_HALT)) {
+    Serial.println("ERROR: write DHCSR failed");
+    return false;
+  }
+  uint32_t dhcsr = 0;
+  if (!swd_min::mem_read32(DHCSR, &dhcsr)) {
+    Serial.println("ERROR: read DHCSR failed");
+    return false;
+  }
+
+  if ((dhcsr & DHCSR_S_HALT) == 0) {
+    Serial.println("WARN: core did not report HALT; continuing anyway");
+  }
+  return true;
+}
+
 bool flash_read_bytes(uint32_t addr, uint8_t *out, uint32_t len, uint32_t *flash_optr_out) {
   if (len == 0) return true;
   if (!out) return false;
@@ -574,6 +666,148 @@ bool flash_verify_and_dump(uint32_t addr, const uint8_t *data, uint32_t len) {
   }
 
   Serial.printf("Verify complete. Bytes differed: %lu\n", (unsigned long)mismatches);
+  return mismatches == 0;
+}
+
+bool flash_verify_fast(uint32_t addr, const uint8_t *data, uint32_t len, uint32_t *mismatch_count_out,
+                       uint32_t max_report) {
+  if (mismatch_count_out) *mismatch_count_out = 0;
+  if (!data || len == 0) return true;
+
+  // Word-compare only (production speed). Require 32-bit alignment.
+  if ((addr & 0x3u) != 0 || (len & 0x3u) != 0) {
+    Serial.println("ERROR: fast verify requires 32-bit aligned addr and length (word-compare only)");
+    return false;
+  }
+
+  swd_min::AhbApSession ap;
+  if (!ap.begin()) {
+    Serial.println("ERROR: AHB-AP session init failed");
+    return false;
+  }
+
+  uint32_t mismatches = 0;
+  uint32_t reported = 0;
+
+  // Prefer pipelined reads for speed, but validate per-chunk and fall back to safe
+  // reads if the pipeline produces inconsistent results on real hardware.
+  bool use_pipeline = true;
+
+  const uint32_t total_words = len / 4u;
+
+  if (use_pipeline) {
+    static constexpr uint32_t k_words_per_chunk = 64;  // 256 bytes
+    uint32_t buf[k_words_per_chunk];
+
+    uint32_t word_index = 0;
+    while (word_index < total_words) {
+      const uint32_t remaining_words = total_words - word_index;
+      const uint32_t chunk_words = (remaining_words > k_words_per_chunk) ? k_words_per_chunk : remaining_words;
+
+      const uint32_t chunk_addr = addr + (word_index * 4u);
+
+      if (!ap.read32_pipelined(chunk_addr, buf, chunk_words)) {
+        Serial.printf("WARN: pipelined verify failed at 0x%08lX; retrying with safe reads\n",
+                      (unsigned long)chunk_addr);
+        use_pipeline = false;
+        ap.invalidate();
+        break;
+      }
+
+      // Validate pipeline on this chunk with a couple of known-correct reads.
+      // This catches cases where pipelining seems to work initially but later drifts or
+      // returns stale data on real hardware.
+      {
+        const uint32_t last_addr = chunk_addr + ((chunk_words - 1u) * 4u);
+
+        uint32_t check0 = 0;
+        uint32_t check_last = 0;
+
+        if (!ap.read32(chunk_addr, &check0)) {
+          Serial.printf("ERROR: verify validation read failed at 0x%08lX\n", (unsigned long)chunk_addr);
+          if (mismatch_count_out) *mismatch_count_out = mismatches;
+          return false;
+        }
+        if (!ap.read32(last_addr, &check_last)) {
+          Serial.printf("ERROR: verify validation read failed at 0x%08lX\n", (unsigned long)last_addr);
+          if (mismatch_count_out) *mismatch_count_out = mismatches;
+          return false;
+        }
+
+        // Invalidate TAR state before continuing the pipelined loop.
+        ap.invalidate();
+
+        if (check0 != buf[0] || check_last != buf[chunk_words - 1u]) {
+          Serial.printf("WARN: pipelined AP reads appear unreliable in this region (0x%08lX..0x%08lX); using safe reads\n",
+                        (unsigned long)chunk_addr, (unsigned long)last_addr);
+          use_pipeline = false;
+
+          // Re-read this chunk using the safe method so we don't produce false mismatches.
+          for (uint32_t i = 0; i < chunk_words; i++) {
+            if (!ap.read32(chunk_addr + i * 4u, &buf[i])) {
+              Serial.printf("ERROR: flash verify read failed at 0x%08lX\n", (unsigned long)(chunk_addr + i * 4u));
+              if (mismatch_count_out) *mismatch_count_out = mismatches;
+              return false;
+            }
+          }
+          ap.invalidate();
+        }
+      }
+
+      for (uint32_t i = 0; i < chunk_words; i++) {
+        uint32_t exp_word = 0;
+        memcpy(&exp_word, data + ((word_index + i) * 4u), 4);
+        const uint32_t got_word = buf[i];
+        if (got_word != exp_word) {
+          mismatches++;
+          if (reported < max_report) {
+            const uint32_t a = addr + ((word_index + i) * 4u);
+            // Extra diagnostic: re-read this word using the known-correct (DP.RDBUFF) path.
+            uint32_t got_safe = 0;
+            const bool safe_ok = swd_min::mem_read32(a, &got_safe);
+            // `mem_read32()` reconfigures AP/DP state, so invalidate the session TAR cache.
+            ap.invalidate();
+
+            if (safe_ok) {
+              Serial.printf("Mismatch @ 0x%08lX: exp=%08lX got=%08lX (safe=%08lX)\n", (unsigned long)a,
+                            (unsigned long)exp_word, (unsigned long)got_word, (unsigned long)got_safe);
+            } else {
+              Serial.printf("Mismatch @ 0x%08lX: exp=%08lX got=%08lX (safe read FAILED)\n", (unsigned long)a,
+                            (unsigned long)exp_word, (unsigned long)got_word);
+            }
+            reported++;
+          }
+        }
+      }
+
+      word_index += chunk_words;
+    }
+  }
+
+  if (!use_pipeline) {
+    for (uint32_t i = 0; i < total_words; i++) {
+      uint32_t got_word = 0;
+      if (!ap.read32(addr + i * 4u, &got_word)) {
+        Serial.printf("ERROR: flash verify read failed at 0x%08lX\n", (unsigned long)(addr + i * 4u));
+        if (mismatch_count_out) *mismatch_count_out = mismatches;
+        return false;
+      }
+
+      uint32_t exp_word = 0;
+      memcpy(&exp_word, data + i * 4u, 4);
+      if (got_word != exp_word) {
+        mismatches++;
+        if (reported < max_report) {
+          const uint32_t a = addr + i * 4u;
+          Serial.printf("Mismatch @ 0x%08lX: exp=%08lX got=%08lX\n", (unsigned long)a, (unsigned long)exp_word,
+                        (unsigned long)got_word);
+          reported++;
+        }
+      }
+    }
+  }
+
+  if (mismatch_count_out) *mismatch_count_out = mismatches;
   return mismatches == 0;
 }
 

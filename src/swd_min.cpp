@@ -902,6 +902,13 @@ bool AhbApSession::write32(uint32_t addr, uint32_t val) {
   }
   if (!ap_write_reg_fast(AP_ADDR_DRW, val, nullptr)) return false;
   tar_ += 4;
+
+  // AHB-AP TAR auto-increment is commonly documented as wrapping on a 1KB boundary
+  // (low 10 address bits). To be robust across implementations, force a TAR rewrite
+  // whenever we cross that boundary.
+  if ((tar_ & 0x3FFu) == 0) {
+    tar_valid_ = false;
+  }
   return true;
 }
 
@@ -923,6 +930,68 @@ bool AhbApSession::read32(uint32_t addr, uint32_t *val_out) {
   if (!dp_read(DP_ADDR_RDBUFF, &v, &ack1, /*log_enable=*/false, /*post_idle=*/false)) return false;
   if (val_out) *val_out = v;
   tar_ += 4;
+
+  // See note in write32() about TAR auto-increment wrap.
+  if ((tar_ & 0x3FFu) == 0) {
+    tar_valid_ = false;
+  }
+  return true;
+}
+
+bool AhbApSession::read32_pipelined(uint32_t addr, uint32_t *out_words, uint32_t words) {
+  if (words == 0) return true;
+  if (!out_words) return false;
+
+  // IMPORTANT: Many AHB-AP implementations wrap TAR auto-increment on a 1KB boundary.
+  // Therefore we must not rely on auto-increment across that boundary inside a single
+  // pipelined burst. Split into sub-bursts that stay within the current 1KB window.
+  uint32_t remaining = words;
+  uint32_t cur_addr = addr;
+  uint32_t *dst = out_words;
+
+  while (remaining) {
+    const uint32_t in_1kb = cur_addr & 0x3FFu;
+    const uint32_t bytes_left_in_1kb = 0x400u - in_1kb;
+    const uint32_t words_left_in_1kb = bytes_left_in_1kb / 4u;
+    const uint32_t burst_words = (remaining < words_left_in_1kb) ? remaining : words_left_in_1kb;
+
+    // Ensure TAR points at the burst start.
+    if (!tar_valid_ || cur_addr != tar_) {
+      if (!ap_write_reg_fast(AP_ADDR_TAR, cur_addr, nullptr)) return false;
+      tar_ = cur_addr;
+      tar_valid_ = true;
+    }
+
+    uint32_t stale = 0;
+    uint8_t ack = 0;
+
+    // Kick off first read (stale is ignored).
+    if (!ap_read(AP_ADDR_DRW, &stale, &ack, /*log_enable=*/false, /*post_idle=*/false)) return false;
+
+    // Each subsequent AP read returns the previous read's true value.
+    for (uint32_t i = 0; i < (burst_words - 1u); i++) {
+      if (!ap_read(AP_ADDR_DRW, &stale, &ack, /*log_enable=*/false, /*post_idle=*/false)) return false;
+      dst[i] = stale;
+    }
+
+    // Fetch the last word via DP.RDBUFF.
+    uint32_t last = 0;
+    uint8_t ack1 = 0;
+    if (!dp_read(DP_ADDR_RDBUFF, &last, &ack1, /*log_enable=*/false, /*post_idle=*/false)) return false;
+    dst[burst_words - 1u] = last;
+
+    // Advance.
+    tar_ += 4u * burst_words;
+    cur_addr += 4u * burst_words;
+    dst += burst_words;
+    remaining -= burst_words;
+
+    // If we ended exactly on a 1KB boundary, force TAR rewrite on next burst.
+    if ((tar_ & 0x3FFu) == 0) {
+      tar_valid_ = false;
+    }
+  }
+
   return true;
 }
 

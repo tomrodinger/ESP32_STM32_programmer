@@ -69,7 +69,7 @@ End-to-end programming should follow this sequence (both on hardware and in the 
   3. **Connect + halt** core via [`stm32g0_prog::connect_and_halt()`](src/stm32g0_prog.cpp:76)
   4. **Flash mass erase** via [`stm32g0_prog::flash_mass_erase_under_reset()`](src/stm32g0_prog.cpp:275)
   5. **Flash program** (in the simulator: a small 8-byte payload) via [`stm32g0_prog::flash_program()`](src/stm32g0_prog.cpp:130)
-  6. **Verify** by reading flash back and comparing via [`stm32g0_prog::flash_verify_and_dump()`](src/stm32g0_prog.cpp:186)
+  6. **Verify** by reading flash back and comparing via [`stm32g0_prog::flash_verify_fast()`](src/stm32g0_prog.cpp:581)
 
 ### What’s in this repo
 
@@ -139,13 +139,13 @@ In this edge-only model, the only legal SWDIO transitions are:
           - `b` DP ABORT write test (writes DP[0x00]=0x1E under NRST low then high)
           - `r` read first 8 bytes of target flash @ `0x08000000`
           - `e` mass erase (connect-under-reset recovery method)
-         - `w` write embedded firmware (prints a timing benchmark)
-          - `v` verify embedded firmware
-          - `a` all (connect+halt, erase, write, verify)
+          - `w` write embedded firmware (prints a timing benchmark)
+           - `v` verify embedded firmware (FAST; prints a timing benchmark)
+           - `a` all (connect+halt, erase, write, verify)
 
 ## Performance / benchmarking
 
-The `w` command prints a simple on-device benchmark so you can track programming speed improvements.
+The `w` and `v` commands print simple on-device benchmarks so you can track production-critical speed improvements.
 
 - It temporarily disables SWD verbose logging (see [`swd_min::set_verbose()`](src/swd_min.cpp:14)), because Serial printing can dominate runtime.
 - It reports:
@@ -154,10 +154,13 @@ The `w` command prints a simple on-device benchmark so you can track programming
   - total time
   - a rough throughput estimate (KiB/s over the program phase)
 
+For `v`, it similarly reports connect/verify/total time and a rough throughput estimate over the verify phase.
+
 Implementation details:
 
 - Flash busy polling for programming uses microsecond-scale backoff instead of `delay(1)`.
 - Bulk programming uses an AHB-AP “session” to avoid re-writing `SELECT/CSW/TAR` for every 32-bit access (major SWD traffic reduction).
+- Fast verify uses an AHB-AP session plus AP posted-read pipelining to reduce SWD traffic during readback (word compares only).
 
 ## Known current limitations (bench)
 

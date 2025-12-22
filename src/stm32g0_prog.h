@@ -12,6 +12,15 @@ static constexpr uint32_t FLASH_PAGE_SIZE_BYTES = 2048u;   // 2KB
 // Connect to target over SWD and halt the core.
 bool connect_and_halt();
 
+// Aggressive connect+halt intended for production commands where target firmware may
+// disable SWD pins very quickly after reset.
+//
+// Strategy:
+// - While NRST is LOW, power up DP and pre-stage AHB-AP (CSW+TAR=DHCSR)
+// - Release NRST and immediately blast a DHCSR halt write in the critical window
+// - Re-establish DP after reset, then confirm core is halted
+bool connect_and_halt_under_reset_recovery();
+
 // Flash operations
 bool flash_mass_erase();
 // Mass erase while NRST is held LOW - for recovering chips where firmware disables SWD.
@@ -21,6 +30,14 @@ bool flash_program(uint32_t addr, const uint8_t *data, uint32_t len);
 
 // Verify + dump bytes read from flash. Returns true only if all bytes match.
 bool flash_verify_and_dump(uint32_t addr, const uint8_t *data, uint32_t len);
+
+// Fast verify for production use.
+// - Uses an AHB-AP session (bulk reads)
+// - Avoids per-line dumps (Serial printing dominates runtime)
+// - Optionally prints up to max_report mismatches (address + expected/got)
+// Returns true only if all bytes match.
+bool flash_verify_fast(uint32_t addr, const uint8_t *data, uint32_t len, uint32_t *mismatch_count_out,
+                       uint32_t max_report);
 
 // Read arbitrary bytes from target memory via SWD/AHB-AP.
 // This is used for flash reads (e.g. addr=FLASH_BASE) but is generic.

@@ -24,7 +24,7 @@ static void print_help() {
   Serial.println("  e = erase entire flash (mass erase; connect-under-reset recovery method)");
   Serial.println("  w = write firmware to flash");
   Serial.println("      (prints a simple benchmark: connect/program/total time)");
-  Serial.println("  v = verify firmware in flash (dumps bytes read + mismatch count)");
+  Serial.println("  v = verify firmware in flash (FAST; prints benchmark + mismatch count)");
   Serial.println("  a = all: connect+halt, erase, write, verify");
 }
 
@@ -119,9 +119,42 @@ static bool cmd_write() {
 }
 
 static bool cmd_verify() {
-  if (!cmd_connect()) return false;
-  const bool ok = stm32g0_prog::flash_verify_and_dump(stm32g0_prog::FLASH_BASE, firmware_bin, firmware_bin_len);
-  Serial.println(ok ? "Verify OK (all bytes match)" : "Verify FAIL (see mismatch count above)");
+  // Production-oriented verify:
+  // - Use aggressive connect-under-reset + immediate halt so user firmware cannot
+  //   disable SWD pins before we halt the core.
+  // - Use fast verify (bulk AHB-AP reads) and avoid dumping all bytes.
+  const bool prev_verbose = swd_min::verbose_enabled();
+  // For production speed, keep SWD verbose off for the whole verify operation.
+  swd_min::set_verbose(false);
+
+  const uint32_t t0 = millis();
+  const bool connect_ok = stm32g0_prog::connect_and_halt_under_reset_recovery();
+  const uint32_t t1 = millis();
+
+  uint32_t mismatches = 0;
+  bool verify_ok = false;
+  if (connect_ok) {
+    verify_ok = stm32g0_prog::flash_verify_fast(stm32g0_prog::FLASH_BASE, firmware_bin, firmware_bin_len, &mismatches,
+                                                /*max_report=*/8);
+  }
+  const uint32_t t2 = millis();
+
+  swd_min::set_verbose(prev_verbose);
+
+  const uint32_t ms_connect = t1 - t0;
+  const uint32_t ms_verify = t2 - t1;
+  const uint32_t ms_total = t2 - t0;
+
+  // Throughput estimate (payload bytes / verify time). Avoid div by zero.
+  const float verify_s = (ms_verify > 0) ? (ms_verify / 1000.0f) : 0.0001f;
+  const float kbps = (firmware_bin_len / 1024.0f) / verify_s;
+
+  Serial.printf("Benchmark v: connect=%lums verify=%lums total=%lums (%.2f KiB/s over verify phase)\n",
+                (unsigned long)ms_connect, (unsigned long)ms_verify, (unsigned long)ms_total, (double)kbps);
+  Serial.printf("Verify mismatches: %lu\n", (unsigned long)mismatches);
+
+  const bool ok = connect_ok && verify_ok;
+  Serial.println(ok ? "Verify OK (all bytes match)" : "Verify FAIL");
   return ok;
 }
 
@@ -235,7 +268,9 @@ static bool cmd_all() {
   if (!cmd_connect()) return false;
   if (!stm32g0_prog::flash_mass_erase()) return false;
   if (!stm32g0_prog::flash_program(stm32g0_prog::FLASH_BASE, firmware_bin, firmware_bin_len)) return false;
-  return stm32g0_prog::flash_verify_and_dump(stm32g0_prog::FLASH_BASE, firmware_bin, firmware_bin_len);
+  uint32_t mismatches = 0;
+  return stm32g0_prog::flash_verify_fast(stm32g0_prog::FLASH_BASE, firmware_bin, firmware_bin_len, &mismatches,
+                                         /*max_report=*/8);
 }
 
 void setup() {
