@@ -4,6 +4,20 @@
 
 namespace stm32g0_prog {
 
+// Minimal read-at-offset interface used for filesystem-backed firmware.
+//
+// Contract:
+// - size() returns the underlying file size in bytes
+// - read_at(offset, dst, n, &out_n) reads up to n bytes starting at offset
+// - if offset == size(), out_n must be 0
+// - offsets must be supported in ascending order (random access is preferred but not required)
+class FirmwareReader {
+ public:
+  virtual ~FirmwareReader() = default;
+  virtual uint32_t size() const = 0;
+  virtual bool read_at(uint32_t offset, uint8_t *dst, uint32_t n, uint32_t *out_n) = 0;
+};
+
 // Target specifics (STM32G031)
 static constexpr uint32_t FLASH_BASE = 0x08000000u;
 static constexpr uint32_t FLASH_SIZE_BYTES = 0x10000u;     // 64KB
@@ -28,6 +42,10 @@ bool flash_mass_erase();
 bool flash_mass_erase_under_reset();
 bool flash_program(uint32_t addr, const uint8_t *data, uint32_t len);
 
+// File/stream-backed programming.
+// Reads 8 bytes at a time (STM32G0 doubleword programming), padding past EOF with 0xFF.
+bool flash_program_reader(uint32_t addr, FirmwareReader &r);
+
 // Verify + dump bytes read from flash. Returns true only if all bytes match.
 bool flash_verify_and_dump(uint32_t addr, const uint8_t *data, uint32_t len);
 
@@ -38,6 +56,11 @@ bool flash_verify_and_dump(uint32_t addr, const uint8_t *data, uint32_t len);
 // Returns true only if all bytes match.
 bool flash_verify_fast(uint32_t addr, const uint8_t *data, uint32_t len, uint32_t *mismatch_count_out,
                        uint32_t max_report);
+
+// File/stream-backed fast verify.
+// Verifies up to round_up(file_size, 8) bytes (matches flash_program() padding behavior).
+// Reads 4 bytes at a time (word compare) and pads past EOF with 0xFF.
+bool flash_verify_fast_reader(uint32_t addr, FirmwareReader &r, uint32_t *mismatch_count_out, uint32_t max_report);
 
 // Read arbitrary bytes from target memory via SWD/AHB-AP.
 // This is used for flash reads (e.g. addr=FLASH_BASE) but is generic.

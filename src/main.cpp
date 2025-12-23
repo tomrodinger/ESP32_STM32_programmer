@@ -1,8 +1,12 @@
 #include <Arduino.h>
 
-#include "binary.h"
+#include "firmware_fs.h"
+#include "firmware_source.h"
+#include "firmware_source_file.h"
 #include "stm32g0_prog.h"
 #include "swd_min.h"
+
+#include <LittleFS.h>
 
 static const swd_min::Pins PINS(35, 36, 37);
 
@@ -33,6 +37,8 @@ static void print_user_pressed_banner(char c) {
 static void print_help() {
   Serial.println("Commands:");
   Serial.println("  h = help");
+  Serial.println("  f = filesystem status (LittleFS) + list files");
+  Serial.println("  F = select firmware file (must match bootloader*.bin; exactly one match required)");
   Serial.println("  i = reset + read DP IDCODE");
   Serial.println("  R = let firmware run: clear debug-halt state, pulse NRST, then release SWD pins");
   Serial.println("  t = SWD smoke test (DP power-up handshake + AHB-AP IDR)");
@@ -50,6 +56,21 @@ static void print_help() {
   Serial.println("Production jig:");
   Serial.printf("  Button on GPIO%d (INPUT_PULLUP) pulls to GND when pressed -> runs <space> sequence\n",
                 k_prod_button_pin);
+}
+
+static bool ensure_fs_mounted() {
+  static bool mounted = false;
+  if (mounted) return true;
+
+  Serial.println("Mounting LittleFS (partition label fwfs, base path /littlefs)...");
+  mounted = firmware_fs::begin();
+  Serial.println(mounted ? "LittleFS mount OK" : "LittleFS mount FAIL");
+  return mounted;
+}
+
+static bool select_firmware_path(String &out_path) {
+  if (!ensure_fs_mounted()) return false;
+  return firmware_fs::find_single_firmware_bin(out_path);
 }
 
 static void cmd_reset_pulse_run() {
@@ -155,11 +176,24 @@ static bool cmd_erase() {
 }
 
 static bool cmd_write() {
+  String fw_path;
+  if (!select_firmware_path(fw_path)) {
+    Serial.println("Write FAIL (no valid firmware file selected)");
+    return false;
+  }
+
   // Benchmark 'w' without changing SWD clock:
   // - keep existing verbose setting for connect reliability
   // - disable verbose only during programming (Serial prints dominate runtime)
   // - measure connect + program + total
   const bool prev_verbose = swd_min::verbose_enabled();
+
+  firmware_source::FileReader file_reader(LittleFS);
+  if (!file_reader.open(fw_path.c_str())) {
+    Serial.printf("Write FAIL (could not open firmware file: %s)\n", fw_path.c_str());
+    return false;
+  }
+  firmware_source::Stm32G0Adapter fw_reader(file_reader);
 
   const uint32_t t0 = millis();
   const bool connect_ok = stm32g0_prog::connect_and_halt();
@@ -168,7 +202,7 @@ static bool cmd_write() {
   bool prog_ok = false;
   if (connect_ok) {
     swd_min::set_verbose(false);
-    prog_ok = stm32g0_prog::flash_program(stm32g0_prog::FLASH_BASE, firmware_bin, firmware_bin_len);
+    prog_ok = stm32g0_prog::flash_program_reader(stm32g0_prog::FLASH_BASE, fw_reader);
     swd_min::set_verbose(prev_verbose);
   }
   const uint32_t t2 = millis();
@@ -179,7 +213,7 @@ static bool cmd_write() {
 
   // Throughput estimate (payload bytes / programming time). Avoid div by zero.
   const float prog_s = (ms_program > 0) ? (ms_program / 1000.0f) : 0.0001f;
-  const float kbps = (firmware_bin_len / 1024.0f) / prog_s;
+  const float kbps = (file_reader.size() / 1024.0f) / prog_s;
 
   Serial.printf("Benchmark w: connect=%lums program=%lums total=%lums (%.2f KiB/s over program phase)\n",
                 (unsigned long)ms_connect, (unsigned long)ms_program, (unsigned long)ms_total, (double)kbps);
@@ -190,6 +224,19 @@ static bool cmd_write() {
 }
 
 static bool cmd_verify() {
+  String fw_path;
+  if (!select_firmware_path(fw_path)) {
+    Serial.println("Verify FAIL (no valid firmware file selected)");
+    return false;
+  }
+
+  firmware_source::FileReader file_reader(LittleFS);
+  if (!file_reader.open(fw_path.c_str())) {
+    Serial.printf("Verify FAIL (could not open firmware file: %s)\n", fw_path.c_str());
+    return false;
+  }
+  firmware_source::Stm32G0Adapter fw_reader(file_reader);
+
   // Production-oriented verify:
   // - Use aggressive connect-under-reset + immediate halt so user firmware cannot
   //   disable SWD pins before we halt the core.
@@ -205,8 +252,8 @@ static bool cmd_verify() {
   uint32_t mismatches = 0;
   bool verify_ok = false;
   if (connect_ok) {
-    verify_ok = stm32g0_prog::flash_verify_fast(stm32g0_prog::FLASH_BASE, firmware_bin, firmware_bin_len, &mismatches,
-                                                /*max_report=*/8);
+    verify_ok = stm32g0_prog::flash_verify_fast_reader(stm32g0_prog::FLASH_BASE, fw_reader, &mismatches,
+                                                       /*max_report=*/8);
   }
   const uint32_t t2 = millis();
 
@@ -218,7 +265,7 @@ static bool cmd_verify() {
 
   // Throughput estimate (payload bytes / verify time). Avoid div by zero.
   const float verify_s = (ms_verify > 0) ? (ms_verify / 1000.0f) : 0.0001f;
-  const float kbps = (firmware_bin_len / 1024.0f) / verify_s;
+  const float kbps = (file_reader.size() / 1024.0f) / verify_s;
 
   Serial.printf("Benchmark v: connect=%lums verify=%lums total=%lums (%.2f KiB/s over verify phase)\n",
                 (unsigned long)ms_connect, (unsigned long)ms_verify, (unsigned long)ms_total, (double)kbps);
@@ -338,10 +385,8 @@ static bool cmd_ap_csw_write_readback_test() {
 static bool cmd_all() {
   if (!cmd_connect()) return false;
   if (!stm32g0_prog::flash_mass_erase()) return false;
-  if (!stm32g0_prog::flash_program(stm32g0_prog::FLASH_BASE, firmware_bin, firmware_bin_len)) return false;
-  uint32_t mismatches = 0;
-  return stm32g0_prog::flash_verify_fast(stm32g0_prog::FLASH_BASE, firmware_bin, firmware_bin_len, &mismatches,
-                                         /*max_report=*/8);
+  if (!cmd_write()) return false;
+  return cmd_verify();
 }
 
 void setup() {
@@ -352,7 +397,17 @@ void setup() {
 
   Serial.println("\nESP32-S3 STM32G0 Programmer");
   Serial.println("Wiring: GPIO35=SWCLK GPIO36=SWDIO GPIO37=NRST");
-  Serial.printf("Embedded firmware size: %u bytes\n", firmware_bin_len);
+  if (ensure_fs_mounted()) {
+    firmware_fs::print_status();
+    String fw_path;
+    if (firmware_fs::find_single_firmware_bin(fw_path)) {
+      File f = LittleFS.open(fw_path.c_str(), "r");
+      if (f) {
+        Serial.printf("Selected firmware size: %lu bytes\n", (unsigned long)f.size());
+        f.close();
+      }
+    }
+  }
 
   swd_min::begin(PINS);
 
@@ -417,6 +472,18 @@ void loop() {
   print_user_pressed_banner(c);
 
   switch (c) {
+    case 'f':
+      if (ensure_fs_mounted()) firmware_fs::print_status();
+      break;
+
+    case 'F':
+      {
+        String fw_path;
+        const bool ok = select_firmware_path(fw_path);
+        Serial.println(ok ? "Firmware file selection OK" : "Firmware file selection FAIL");
+      }
+      break;
+
     case ' ':
       run_production_sequence("Serial <space>");
       break;

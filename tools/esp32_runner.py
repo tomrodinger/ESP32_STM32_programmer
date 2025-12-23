@@ -42,7 +42,7 @@ except Exception as e:  # pragma: no cover
 #
 # Production sequence is bound to the spacebar (ASCII 0x20). We support it via
 # the explicit `--space` flag (rather than a short `- ` option).
-ALLOWED_CMDS = set("hidbtcpermwva") | {"r", "p", " "}
+ALLOWED_CMDS = set("hidbtcpermwva") | {"r", "p", " ", "f", "F"}
 
 
 def _run(cmd: List[str]) -> None:

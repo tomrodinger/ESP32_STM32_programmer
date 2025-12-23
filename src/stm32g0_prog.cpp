@@ -624,6 +624,90 @@ bool flash_program(uint32_t addr, const uint8_t *data, uint32_t len) {
   return true;
 }
 
+static bool reader_read_exact_or_pad(stm32g0_prog::FirmwareReader &r, uint32_t offset, uint8_t *dst, uint32_t n,
+                                    uint8_t pad) {
+  // Read up to n bytes; if fewer bytes available (EOF), pad remaining with pad.
+  uint32_t got = 0;
+  if (!r.read_at(offset, dst, n, &got)) return false;
+  if (got > n) return false;
+  if (got < n) {
+    memset(dst + got, pad, n - got);
+  }
+  return true;
+}
+
+bool flash_program_reader(uint32_t addr, FirmwareReader &r) {
+  const uint32_t len = r.size();
+  if (len == 0) {
+    Serial.println("ERROR: firmware file is empty");
+    return false;
+  }
+
+  swd_min::AhbApSession ap;
+  if (!ap.begin()) {
+    Serial.println("ERROR: AHB-AP session init failed");
+    return false;
+  }
+
+  if (!wait_flash_not_busy(/*timeout_ms=*/5000, &ap)) {
+    Serial.println("ERROR: flash busy timeout before program");
+    return false;
+  }
+  if (!flash_unlock_fast(ap)) return false;
+
+  if (!flash_clear_sr_flags_fast(ap, FLASH_SR_CLEAR_MASK)) {
+    Serial.println("ERROR: failed to clear FLASH_SR flags before program");
+    return false;
+  }
+
+  const uint32_t padded_len = (len + 7u) & ~7u;
+  Serial.printf("Programming %lu bytes from firmware file (padded to %lu) at 0x%08lX...\n", (unsigned long)len,
+                (unsigned long)padded_len, (unsigned long)addr);
+
+  // Keep PG set for the whole loop (same optimization as flash_program()).
+  {
+    uint32_t cr = 0;
+    if (!ap.read32(FLASH_CR, &cr)) return false;
+    cr &= ~(FLASH_CR_PER | FLASH_CR_MER1);
+    cr |= FLASH_CR_PG;
+    if (!ap.write32(FLASH_CR, cr)) return false;
+  }
+
+  for (uint32_t i = 0; i < padded_len; i += 8u) {
+    uint8_t chunk[8];
+    if (!reader_read_exact_or_pad(r, /*offset=*/i, chunk, /*n=*/8u, /*pad=*/0xFF)) {
+      Serial.printf("ERROR: firmware read failed at offset %lu\n", (unsigned long)i);
+      return false;
+    }
+
+    uint32_t w0 = 0, w1 = 0;
+    memcpy(&w0, &chunk[0], 4);
+    memcpy(&w1, &chunk[4], 4);
+
+    if (!ap.write32(addr + i + 0, w0)) return false;
+    if (!ap.write32(addr + i + 4, w1)) return false;
+
+    if (!wait_flash_not_busy(/*timeout_ms=*/10, &ap)) {
+      Serial.printf("ERROR: flash busy timeout at offset 0x%lX\n", (unsigned long)i);
+      return false;
+    }
+
+    if ((i % 1024u) == 0) Serial.print('.');
+  }
+
+  // Clear PG and lock.
+  {
+    uint32_t cr = 0;
+    if (!ap.read32(FLASH_CR, &cr)) return false;
+    cr &= ~FLASH_CR_PG;
+    cr |= FLASH_CR_LOCK;
+    if (!ap.write32(FLASH_CR, cr)) return false;
+  }
+  (void)flash_clear_sr_flags_fast(ap, FLASH_SR_CLEAR_MASK);
+  Serial.println("\nProgram done");
+  return true;
+}
+
 static void print_hex_line(uint32_t base_addr, const uint8_t *buf, uint32_t n) {
   Serial.printf("0x%08lX: ", (unsigned long)base_addr);
   for (uint32_t i = 0; i < n; i++) {
@@ -803,6 +887,68 @@ bool flash_verify_fast(uint32_t addr, const uint8_t *data, uint32_t len, uint32_
                         (unsigned long)got_word);
           reported++;
         }
+      }
+    }
+  }
+
+  if (mismatch_count_out) *mismatch_count_out = mismatches;
+  return mismatches == 0;
+}
+
+bool flash_verify_fast_reader(uint32_t addr, FirmwareReader &r, uint32_t *mismatch_count_out, uint32_t max_report) {
+  if (mismatch_count_out) *mismatch_count_out = 0;
+
+  const uint32_t len = r.size();
+  if (len == 0) {
+    Serial.println("ERROR: firmware file is empty");
+    return false;
+  }
+
+  if ((addr & 0x3u) != 0) {
+    Serial.println("ERROR: fast verify requires 32-bit aligned addr (word-compare only)");
+    return false;
+  }
+
+  // Match programming padding semantics.
+  const uint32_t padded_len = (len + 7u) & ~7u;
+  if ((padded_len & 0x3u) != 0) {
+    Serial.println("ERROR: internal verify length not word-aligned");
+    return false;
+  }
+
+  swd_min::AhbApSession ap;
+  if (!ap.begin()) {
+    Serial.println("ERROR: AHB-AP session init failed");
+    return false;
+  }
+
+  uint32_t mismatches = 0;
+  uint32_t reported = 0;
+
+  // Read and compare word-by-word.
+  for (uint32_t off = 0; off < padded_len; off += 4u) {
+    uint8_t exp_bytes[4];
+    if (!reader_read_exact_or_pad(r, /*offset=*/off, exp_bytes, /*n=*/4u, /*pad=*/0xFF)) {
+      Serial.printf("ERROR: firmware read failed at offset %lu\n", (unsigned long)off);
+      return false;
+    }
+
+    uint32_t exp_word = 0;
+    memcpy(&exp_word, exp_bytes, 4);
+
+    uint32_t got_word = 0;
+    if (!ap.read32(addr + off, &got_word)) {
+      Serial.printf("ERROR: flash verify read failed at 0x%08lX\n", (unsigned long)(addr + off));
+      if (mismatch_count_out) *mismatch_count_out = mismatches;
+      return false;
+    }
+
+    if (got_word != exp_word) {
+      mismatches++;
+      if (reported < max_report) {
+        Serial.printf("Mismatch @ 0x%08lX: exp=0x%08lX got=0x%08lX\n", (unsigned long)(addr + off),
+                      (unsigned long)exp_word, (unsigned long)got_word);
+        reported++;
       }
     }
   }

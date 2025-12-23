@@ -1,0 +1,11 @@
+# Name,   Type, SubType, Offset,  Size, Flags
+# Based on ESP32-S3 DevKitC-1 default 8MB partition layout.
+# Change: replace the default `spiffs` data partition label with `fwfs` so we can mount LittleFS there.
+
+nvs,      data, nvs,     0x9000,  0x5000,
+otadata,  data, ota,     0xe000,  0x2000,
+app0,     app,  ota_0,   0x10000, 0x330000,
+app1,     app,  ota_1,   0x340000,0x330000,
+fwfs,     data, spiffs,  0x670000,0x180000,
+coredump, data, coredump,0x7F0000,0x10000,
+

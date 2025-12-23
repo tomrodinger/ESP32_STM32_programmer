@@ -12,7 +12,10 @@
 #include "../stm32_swd_target.h"
 #include "../sim_api.h"
 
-#include "../binary.h"
+// Simulator compatibility note:
+// The ESP32 firmware now sources the STM32 image from a filesystem file.
+// For simulations we keep a tiny embedded payload to seed the simulated target.
+#include <cstdint>
 
 namespace sim {
 
@@ -38,9 +41,10 @@ struct Runtime {
 
   Runtime() : logger(std::make_unique<CsvLogger>("signals.csv")) {
     target.reset();
-    // Default simulated flash contents should match the repo's embedded firmware blob.
+    // Default simulated flash contents: tiny placeholder image.
     // This enables read-flash simulations without requiring a separate programming step.
-    target.load_flash_image(firmware_bin, firmware_bin_len);
+    static const uint8_t firmware_bin_8[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE};
+    target.load_flash_image(firmware_bin_8, (unsigned)sizeof(firmware_bin_8));
   }
 };
 
