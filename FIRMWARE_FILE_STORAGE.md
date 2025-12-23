@@ -110,3 +110,12 @@ flowchart TD
 4. `v` (verify) uses the same file-backed firmware and succeeds.
 5. Benchmarks still print meaningful throughput (bytes read/programmed).
 6. Build remains warning-free (`pio run` clean).
+
+## Local test artifacts in this repo
+
+This repo includes a known-good bootloader image and a deliberately corrupted variant for testing that `verify` fails when firmware content differs.
+
+- `bootloader_M17_hw1.5_scc3_1766404965.bin`
+- `bootloader_M17_hw1.5_scc3_corrupted.bin`
+
+The corrupted file is derived from the original by flipping **one bit** at byte offset `0x1202` (decimal `4610`).
