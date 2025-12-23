@@ -80,6 +80,33 @@ This repo now defines a custom partition table in [`platformio.ini`](platformio.
 - a filesystem partition exists with label `fwfs` and size sufficient for at least ~200kB firmware files
 - it is mounted via LittleFS (Arduino-ESP32) using partition label `fwfs`
 
+### Note on ESPConnect upload failures (why "format in ESPConnect" used to fix it)
+
+Observed symptom:
+
+- a LittleFS image built on the host and flashed to the device can be *listed* in ESPConnect
+- but uploads in ESPConnect fail unless the partition is formatted again from ESPConnect
+
+Root cause in this repo (and why it looked confusing):
+
+- Our partition table previously declared the filesystem partition as subtype `spiffs`.
+- A host-built LittleFS image was being flashed into that partition anyway.
+- Some tools (including ESPConnect) pick the filesystem driver from the partition subtype.
+  So they can sometimes still enumerate data, but write/upload paths can fail until they re-format
+  (which creates a filesystem matching what the tool expects for that partition).
+
+Fix:
+
+- The filesystem partition is now declared as LittleFS subtype **0x83** in
+  [`partitions_firmware_fs_8MB.csv`](partitions_firmware_fs_8MB.csv:1).
+  We use the numeric value because the Arduino-ESP32 partition CSV parser in this toolchain
+  doesn't accept the `littlefs` keyword.
+
+Build/upload impact:
+
+- Standard `pio run -t buildfs/uploadfs` is not reliable with a numeric subtype.
+- Use the repo targets `buildfwfs` + `uploadfwfs` instead.
+
 Uncertainties I will not assume:
 
 - Which filesystem (LittleFS vs SPIFFS vs FATFS) you want to standardize on.

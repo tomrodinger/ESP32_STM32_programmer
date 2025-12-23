@@ -123,7 +123,8 @@ In this edge-only model, the only legal SWDIO transitions are:
       -   Build the project: `pio run`
       -   Upload firmware to ESP32-S3: `pio run -t upload`
       -   (Optional / recommended) Upload the default bootloader file into LittleFS:
-          - `pio run -t uploadfs`
+          - `pio run -t buildfwfs`
+          - `pio run -t uploadfwfs`
     3.  **Run**:
        -   Open the Serial Monitor: `pio device monitor` (baud rate 115200).
        -   Reset the ESP32-S3.
@@ -215,7 +216,8 @@ To change the firmware being flashed to the STM32:
 This repo includes a default `bootloader.bin` in the `data/` directory. You can upload it to the device filesystem with:
 
 ```bash
-pio run -t uploadfs
+pio run -t buildfwfs
+pio run -t uploadfwfs
 ```
 
 ## Automated build/upload + command runner (recommended)
