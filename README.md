@@ -7,7 +7,7 @@ This project demonstrates how to use an ESP32-S3 to program an STM32G031 microco
 -   **Programmer**: ESP32-S3 Development Board
 -   **Target**: STM32G031 (ARM Cortex-M0+)
 -   **Interface**: SWD (Serial Wire Debug)
--   **Firmware**: `bootloader*.bin` stored in ESP32 LittleFS (uploaded via ESPConnect)
+-   **Firmware**: `BL*` stored in ESP32 SPIFFS (uploaded via ESPConnect)
 
 ## Hardware Connections
 
@@ -44,9 +44,9 @@ The project is built using **PlatformIO** with the **Arduino** framework.
     -   **Program**: Writes the firmware binary to flash address `0x08000000`.
     -   **Verify**: Reads back the flash content and compares it with the source binary.
 
-3.  **ESP32 filesystem (LittleFS)**:
-    -   The target firmware `.bin` is stored as a file in LittleFS (partition label `fwfs`, mounted at `/littlefs`).
-    -   The ESP32 firmware scans for exactly one firmware file matching `bootloader*.bin`.
+3.  **ESP32 filesystem (SPIFFS)**:
+    -   The target firmware `.bin` is stored as a file in SPIFFS (partition label `fwfs`, mounted at `/spiffs`).
+    -   The ESP32 firmware scans for exactly one firmware file matching `BL*`.
     -   Files are managed from a browser via ESPConnect.
 
 4.  **`src/main.cpp`**:
@@ -119,12 +119,32 @@ In this edge-only model, the only legal SWDIO transitions are:
 ## Usage
 
    1.  **Hardware Setup**: Wire the ESP32-S3 and STM32G031 according to the table above.
-   2.  **Build & Upload**:
-      -   Build the project: `pio run`
-      -   Upload firmware to ESP32-S3: `pio run -t upload`
-      -   (Optional / recommended) Upload the default bootloader file into LittleFS:
-          - `pio run -t buildfwfs`
-          - `pio run -t uploadfwfs`
+    2.  **Build & Upload**:
+       -   Build the project: `pio run`
+       -   Upload firmware to ESP32-S3: `pio run -t upload`
+       -   (Optional / recommended) Upload the default bootloader file into LittleFS:
+           - `pio run -t buildfwfs`
+           - `pio run -t uploadfwfs`
+
+### One-shot build+upload helper (recommended)
+
+This repo includes a helper script that:
+
+1. Finds **exactly one** `bootloader*.bin` in the project root.
+2. Builds + uploads the `fwfs` SPIFFS image containing that file (it is staged under a shortened `BL*` name due to SPIFFS filename limits).
+3. Builds + uploads the ESP32 firmware via [`python.tools/esp32_runner.py`](tools/esp32_runner.py:1).
+
+Run:
+
+```bash
+python3 build_and_upload.py
+```
+
+Pass through args to `tools/esp32_runner.py` (use `--` separator):
+
+```bash
+python3 build_and_upload.py -- --space --max 120 --quiet 1.0
+```
     3.  **Run**:
        -   Open the Serial Monitor: `pio device monitor` (baud rate 115200).
        -   Reset the ESP32-S3.
@@ -206,7 +226,7 @@ Implementation details:
 
 To change the firmware being flashed to the STM32:
 
-1. Use ESPConnect to upload exactly one file that matches `bootloader*.bin` into the ESP32 LittleFS partition.
+1. Use ESPConnect to upload exactly one file that matches `BL*` into the ESP32 SPIFFS partition.
 2. Ensure there is **exactly one** matching file on the device (multiple matches are treated as an error).
 3. Reboot the ESP32 (or use the `F` command to confirm which firmware file is selected).
 4. Run `w` to program and `v` to verify.

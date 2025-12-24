@@ -4,7 +4,7 @@
 
 namespace firmware_fs {
 
-// Mount LittleFS at base path "/littlefs" using partition label "fwfs".
+// Mount SPIFFS at base path "/spiffs" using partition label "fwfs".
 // Returns true on success.
 bool begin();
 
@@ -19,4 +19,3 @@ void print_status();
 bool find_single_firmware_bin(String &out_path);
 
 }  // namespace firmware_fs
-

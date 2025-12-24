@@ -1,6 +1,7 @@
 Import("env")
 
 import os
+import time
 
 
 def _parse_int(s: str) -> int:
@@ -45,16 +46,31 @@ def _configure_fwfs(env):
         FWFS_SIZE=str(p["size"]),
         FWFS_PAGE=0x100,
         FWFS_BLOCK=0x1000,
+        # Allow overriding the input directory used to build the LittleFS image.
+        # This is useful for automation scripts that want to stage exactly one
+        # bootloader*.bin without modifying the repo's `data/` directory.
+        FWFS_DATA_DIR=os.environ.get("FWFS_DATA_DIR", env.subst("$PROJECT_DATA_DIR")),
         FWFS_IMAGE=os.path.join(env.subst("$BUILD_DIR"), "fwfs.bin"),
     )
+
+    # PlatformIO may not populate a dedicated SPIFFS image tool var. Provide a
+    # robust fallback using the installed package path.
+    try:
+        mkspiffs = env.subst("$MKFSPIFFSTOOL")
+    except Exception:
+        mkspiffs = ""
+    if not mkspiffs or mkspiffs.strip() in ("\"\"", ""):
+        mkspiffs = os.path.join(env.PioPlatform().get_package_dir("tool-mkspiffs"), "mkspiffs_espressif32_arduino")
+    env.Replace(MKFSPIFFSTOOL=mkspiffs)
 
 
 def _build_fwfs(target, source, env):
     _configure_fwfs(env)
     env.Execute(
         env.VerboseAction(
-            '"$MKFSTOOL" -c "$PROJECT_DATA_DIR" -s $FWFS_SIZE -p $FWFS_PAGE -b $FWFS_BLOCK "$FWFS_IMAGE"',
-            "Building FWFS LittleFS image",
+            # Use the SPIFFS mkspiffs tool explicitly (LittleFS mklittlefs is unreliable on some macOS arm64 setups).
+            '"$MKFSPIFFSTOOL" -c "$FWFS_DATA_DIR" -s $FWFS_SIZE -p $FWFS_PAGE -b $FWFS_BLOCK "$FWFS_IMAGE"',
+            "Building FWFS SPIFFS image",
         )
     )
 
@@ -91,9 +107,17 @@ def _upload_fwfs(target, source, env):
         "$FWFS_START $FWFS_IMAGE"
     )
 
-    rc = env.Execute(env.VerboseAction(cmd, "Uploading FWFS LittleFS image"))
-    if rc:
-        raise RuntimeError(f"esptool failed with exit code {rc}")
+    # On macOS, the USB CDC device node can disappear/reappear across resets.
+    # Autodetect + retry a few times to avoid transient "port doesn't exist" failures.
+    last_rc = 0
+    for attempt in range(1, 6):
+        env.AutodetectUploadPort()
+        last_rc = env.Execute(env.VerboseAction(cmd, f"Uploading FWFS SPIFFS image (attempt {attempt}/5)"))
+        if not last_rc:
+            break
+        time.sleep(0.6)
+    if last_rc:
+        raise RuntimeError(f"esptool failed with exit code {last_rc}")
 
 
 # Register custom targets
@@ -101,14 +125,14 @@ env.AddCustomTarget(
     name="buildfwfs",
     dependencies=None,
     actions=[_build_fwfs],
-    title="Build fwfs LittleFS image",
-    description="Build a LittleFS image for the 'fwfs' partition (subtype 0x83).",
+    title="Build fwfs SPIFFS image",
+    description="Build a SPIFFS image for the 'fwfs' partition.",
 )
 
 env.AddCustomTarget(
     name="uploadfwfs",
     dependencies=None,
     actions=[_upload_fwfs],
-    title="Upload fwfs LittleFS image",
-    description="Flash the fwfs LittleFS image to the device at the partition's offset.",
+    title="Upload fwfs SPIFFS image",
+    description="Flash the fwfs SPIFFS image to the device at the partition's offset.",
 )

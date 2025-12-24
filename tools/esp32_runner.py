@@ -115,20 +115,48 @@ def _send_cmd_and_capture(ser: "serial.Serial", cmd_char: str, quiet_s: float, m
 
     start = time.time()
     last_rx = time.time()
+
+    # Some commands can be long-running and may legitimately produce no output
+    # for extended periods (e.g. verify/program). For these, we avoid the
+    # quiet-time early exit and instead stop when we see an expected terminal
+    # marker or when max_s elapses.
+    stop_markers: List[str] = []
+    if cmd_char == "e":
+        stop_markers = ["Erase OK", "Erase FAIL"]
+    elif cmd_char == "w":
+        stop_markers = ["Write OK", "Write FAIL"]
+    elif cmd_char == "v":
+        stop_markers = ["Verify OK", "Verify FAIL"]
+    elif cmd_char == " ":
+        stop_markers = ["PRODUCTION sequence SUCCESS", "Production sequence aborted", "ERROR: Production sequence aborted"]
+    elif cmd_char == "F":
+        stop_markers = ["Firmware file selection OK", "Firmware file selection FAIL"]
+    elif cmd_char == "f":
+        stop_markers = ["Filesystem status:"]
+    elif cmd_char == "i":
+        stop_markers = ["DP IDCODE:", "DP IDCODE read failed"]
+
+    long_running = cmd_char in {"e", "w", "v", " "}
+    buf = ""
     while True:
         data = ser.read(4096)
         now = time.time()
 
         if data:
-            _OUT.write(data.decode("utf-8", errors="replace"))
+            s = data.decode("utf-8", errors="replace")
+            _OUT.write(s)
             _OUT.flush()
+            if stop_markers:
+                buf = (buf + s)[-8192:]
+                if any(m in buf for m in stop_markers):
+                    break
             last_rx = now
         else:
             time.sleep(0.02)
 
         if now - start >= max_s:
             break
-        if now - last_rx >= quiet_s:
+        if (not long_running) and (now - last_rx >= quiet_s):
             break
 
 
@@ -288,7 +316,12 @@ def main() -> int:
     if not args.skip_build:
         _run(["pio", "run"])
     if not args.skip_upload:
-        _run(["pio", "run", "-t", "upload"])
+        # If --port is provided, also use it as PlatformIO's upload port.
+        # This helps when autodetection is flaky on macOS due to USB CDC re-enumeration.
+        if args.port:
+            _run(["pio", "run", "-t", "upload", "--upload-port", args.port])
+        else:
+            _run(["pio", "run", "-t", "upload"])
 
     if not args.cmds:
         _OUT.write("\nNo commands specified (e.g. -i -r). Nothing to do.\n")

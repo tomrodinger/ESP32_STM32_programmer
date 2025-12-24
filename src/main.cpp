@@ -6,7 +6,7 @@
 #include "stm32g0_prog.h"
 #include "swd_min.h"
 
-#include <LittleFS.h>
+#include <SPIFFS.h>
 
 static const swd_min::Pins PINS(35, 36, 37);
 
@@ -37,8 +37,8 @@ static void print_user_pressed_banner(char c) {
 static void print_help() {
   Serial.println("Commands:");
   Serial.println("  h = help");
-  Serial.println("  f = filesystem status (LittleFS) + list files");
-  Serial.println("  F = select firmware file (must match bootloader*.bin; exactly one match required)");
+  Serial.println("  f = filesystem status (SPIFFS) + list files");
+  Serial.println("  F = select firmware file (must match BL*; exactly one match required)");
   Serial.println("  i = reset + read DP IDCODE");
   Serial.println("  R = let firmware run: clear debug-halt state, pulse NRST, then release SWD pins");
   Serial.println("  t = SWD smoke test (DP power-up handshake + AHB-AP IDR)");
@@ -62,9 +62,9 @@ static bool ensure_fs_mounted() {
   static bool mounted = false;
   if (mounted) return true;
 
-  Serial.println("Mounting LittleFS (partition label fwfs, base path /littlefs)...");
+  Serial.println("Mounting SPIFFS (partition label fwfs, base path /spiffs)...");
   mounted = firmware_fs::begin();
-  Serial.println(mounted ? "LittleFS mount OK" : "LittleFS mount FAIL");
+  Serial.println(mounted ? "SPIFFS mount OK" : "SPIFFS mount FAIL");
   return mounted;
 }
 
@@ -188,7 +188,7 @@ static bool cmd_write() {
   // - measure connect + program + total
   const bool prev_verbose = swd_min::verbose_enabled();
 
-  firmware_source::FileReader file_reader(LittleFS);
+  firmware_source::FileReader file_reader(SPIFFS);
   if (!file_reader.open(fw_path.c_str())) {
     Serial.printf("Write FAIL (could not open firmware file: %s)\n", fw_path.c_str());
     return false;
@@ -230,7 +230,7 @@ static bool cmd_verify() {
     return false;
   }
 
-  firmware_source::FileReader file_reader(LittleFS);
+  firmware_source::FileReader file_reader(SPIFFS);
   if (!file_reader.open(fw_path.c_str())) {
     Serial.printf("Verify FAIL (could not open firmware file: %s)\n", fw_path.c_str());
     return false;
@@ -401,7 +401,7 @@ void setup() {
     firmware_fs::print_status();
     String fw_path;
     if (firmware_fs::find_single_firmware_bin(fw_path)) {
-      File f = LittleFS.open(fw_path.c_str(), "r");
+      File f = SPIFFS.open(fw_path.c_str(), "r");
       if (f) {
         Serial.printf("Selected firmware size: %lu bytes\n", (unsigned long)f.size());
         f.close();

@@ -1,14 +1,12 @@
 # Name,   Type, SubType, Offset,  Size, Flags
 #
 # Filesystem partition notes:
-# - We mount LittleFS from the partition labeled "fwfs" (see [`cpp.firmware_fs::begin()`](src/firmware_fs.cpp:30)).
+# - We mount SPIFFS from the partition labeled "fwfs" (see [`cpp.firmware_fs::begin()`](src/firmware_fs.cpp:30)).
 # - ESPConnect and similar tools choose the filesystem driver based on the partition subtype.
-# - Arduino-ESP32's `gen_esp32part.py` in this toolchain does not recognize the keyword `littlefs`
-#   in CSV files, but it does accept the numeric subtype value. LittleFS subtype is 0x83.
 
 nvs,data,nvs,0x9000,0x5000,
 otadata,data,ota,0xE000,0x2000,
 app0,app,ota_0,0x10000,0x330000,
 app1,app,ota_1,0x340000,0x330000,
-fwfs,data,0x83,0x670000,0x180000,
+fwfs,data,spiffs,0x670000,0x180000,
 coredump,data,coredump,0x7F0000,0x10000,
