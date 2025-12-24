@@ -42,7 +42,7 @@ except Exception as e:  # pragma: no cover
 #
 # Production sequence is bound to the spacebar (ASCII 0x20). We support it via
 # the explicit `--space` flag (rather than a short `- ` option).
-ALLOWED_CMDS = set("hidbtcpermwva") | {"r", "p", " ", "f", "F"}
+ALLOWED_CMDS = set("hidbtcpermwvasl") | {"r", "p", " ", "f", "F", "S"}
 
 
 def _run(cmd: List[str]) -> None:
@@ -108,7 +108,8 @@ def _drain_and_print(ser: "serial.Serial", duration_s: float) -> None:
 
 
 def _send_cmd_and_capture(ser: "serial.Serial", cmd_char: str, quiet_s: float, max_s: float) -> None:
-    # Send just the character + newline. Firmware ignores whitespace.
+    # Send the command + newline.
+    # Some commands carry an inline argument (e.g. "S1234").
     payload = (cmd_char + "\n").encode("utf-8")
     ser.write(payload)
     ser.flush()
@@ -121,22 +122,29 @@ def _send_cmd_and_capture(ser: "serial.Serial", cmd_char: str, quiet_s: float, m
     # quiet-time early exit and instead stop when we see an expected terminal
     # marker or when max_s elapses.
     stop_markers: List[str] = []
-    if cmd_char == "e":
+    lead = cmd_char[0] if cmd_char else ""
+    if lead == "e":
         stop_markers = ["Erase OK", "Erase FAIL"]
-    elif cmd_char == "w":
+    elif lead == "w":
         stop_markers = ["Write OK", "Write FAIL"]
-    elif cmd_char == "v":
+    elif lead == "v":
         stop_markers = ["Verify OK", "Verify FAIL"]
-    elif cmd_char == " ":
+    elif lead == "s":
+        stop_markers = ["Serial sync:", "Serial sync FAIL"]
+    elif lead == "l":
+        stop_markers = ["--- /log.txt ---", "Log open FAIL"]
+    elif lead == "S":
+        stop_markers = ["Set serial OK:", "Set serial FAIL", "Set serial:"]
+    elif lead == " ":
         stop_markers = ["PRODUCTION sequence SUCCESS", "Production sequence aborted", "ERROR: Production sequence aborted"]
-    elif cmd_char == "F":
+    elif lead == "F":
         stop_markers = ["Firmware file selection OK", "Firmware file selection FAIL"]
-    elif cmd_char == "f":
+    elif lead == "f":
         stop_markers = ["Filesystem status:"]
-    elif cmd_char == "i":
+    elif lead == "i":
         stop_markers = ["DP IDCODE:", "DP IDCODE read failed"]
 
-    long_running = cmd_char in {"e", "w", "v", " "}
+    long_running = lead in {"e", "w", "v", " "}
     buf = ""
     while True:
         data = ser.read(4096)
@@ -167,15 +175,28 @@ def _parse_cmds(argv: List[str]) -> List[str]:
     """
 
     cmds: List[str] = []
-    for a in argv:
+    i = 0
+    while i < len(argv):
+        a = argv[i]
         if a == "--space":
             cmds.append(" ")
+            i += 1
+            continue
+
+        if a == "--set-serial" and i + 1 < len(argv):
+            n = str(argv[i + 1]).strip()
+            if not n.isdigit():
+                raise ValueError(f"--set-serial expects a uint32 decimal string, got: {n!r}")
+            cmds.append("S" + n)
+            i += 2
             continue
 
         if a.startswith("-") and not a.startswith("--") and len(a) == 2:
             c = a[1]
             if c in ALLOWED_CMDS:
                 cmds.append(c)
+
+        i += 1
 
     return cmds
 
@@ -264,6 +285,7 @@ def _parse_args(argv: List[str]) -> Args:
                 "  --quiet S           Consider command done after S seconds of no output (default: 0.6)\n"
                 "  --max S             Max seconds to wait per command (default: 6)\n"
                 "  --space            Send the production <space> command (ASCII 0x20)\n"
+                "  --set-serial N     Send S<N> to set the next serial (append USERSET_<N>)\n"
             )
             raise SystemExit(0)
         i += 1

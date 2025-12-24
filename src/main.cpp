@@ -8,6 +8,31 @@
 
 #include <SPIFFS.h>
 
+#include "product_info_injector_reader.h"
+#include "program_state.h"
+#include "serial_log.h"
+#include "wifi_web_ui.h"
+
+#include "first_block_override_reader.h"
+
+#include "product_info.h"
+
+static bool g_first_block_snapshot_valid = false;
+static uint8_t g_first_block_snapshot[256];
+
+static void set_first_block_snapshot(const uint8_t *b0, uint32_t n) {
+  if (!b0 || n == 0) {
+    g_first_block_snapshot_valid = false;
+    return;
+  }
+  const uint32_t take = (n > sizeof(g_first_block_snapshot)) ? (uint32_t)sizeof(g_first_block_snapshot) : n;
+  memcpy(g_first_block_snapshot, b0, take);
+  if (take < sizeof(g_first_block_snapshot)) {
+    memset(g_first_block_snapshot + take, 0xFF, sizeof(g_first_block_snapshot) - take);
+  }
+  g_first_block_snapshot_valid = true;
+}
+
 static const swd_min::Pins PINS(35, 36, 37);
 
 // Production jig button:
@@ -17,9 +42,18 @@ static constexpr int k_prod_button_pin = 46;
 static constexpr uint32_t k_button_debounce_ms = 30;
 
 // Forward declarations (used by production sequence helper).
+static bool print_idcode_attempt();
 static bool cmd_erase();
 static bool cmd_write();
 static bool cmd_verify();
+
+static bool cmd_write_with_product_info(uint32_t serial, uint64_t unique_id);
+static bool cmd_verify_with_product_info(uint32_t serial, uint64_t unique_id);
+
+static void print_hex_dump_16(uint32_t base_addr, const uint8_t *data, uint32_t len);
+static void print_product_info_struct(const product_info_struct &pi);
+static bool cmd_sync_serial_from_log();
+static bool cmd_print_log();
 
 static void print_user_pressed_banner(char c) {
   if (c == ' ') {
@@ -40,6 +74,9 @@ static void print_help() {
   Serial.println("  f = filesystem status (SPIFFS) + list files");
   Serial.println("  F = select firmware file (must match BL*; exactly one match required)");
   Serial.println("  i = reset + read DP IDCODE");
+  Serial.println("  s = sync serial from log.txt (re-scan log, load next serial)");
+  Serial.println("  S<serial> = set next serial (append USERSET_<serial>) (example: S1000)");
+  Serial.println("  l = print /log.txt to Serial");
   Serial.println("  R = let firmware run: clear debug-halt state, pulse NRST, then release SWD pins");
   Serial.println("  t = SWD smoke test (DP power-up handshake + AHB-AP IDR)");
   Serial.println("  d = toggle SWD verbose diagnostics");
@@ -48,11 +85,11 @@ static void print_help() {
   Serial.println("  p = read Program Counter (PC) register (tests core register access)");
   Serial.println("  r = read first 8 bytes of target flash @ 0x08000000");
   Serial.println("  e = erase entire flash (mass erase; connect-under-reset recovery method)");
-  Serial.println("  w = write firmware to flash");
+  Serial.println("  w = write firmware to flash (prints serial+unique_id, first block hexdump, product_info_struct)");
   Serial.println("      (prints a simple benchmark: connect/program/total time)");
   Serial.println("  v = verify firmware in flash (FAST; prints benchmark + mismatch count)");
   Serial.println("  a = all: connect+halt, erase, write, verify");
-  Serial.println("  <space> = PRODUCTION: run e -> w -> v -> R (fail-fast; stops at first error)");
+  Serial.println("  <space> = PRODUCTION: run i -> e -> w -> v -> R (fail-fast; stops at first error)");
   Serial.println("Production jig:");
   Serial.printf("  Button on GPIO%d (INPUT_PULLUP) pulls to GND when pressed -> runs <space> sequence\n",
                 k_prod_button_pin);
@@ -70,7 +107,9 @@ static bool ensure_fs_mounted() {
 
 static bool select_firmware_path(String &out_path) {
   if (!ensure_fs_mounted()) return false;
-  return firmware_fs::find_single_firmware_bin(out_path);
+  const bool ok = firmware_fs::find_single_firmware_bin(out_path);
+  if (ok) program_state::set_firmware_filename(out_path);
+  return ok;
 }
 
 static void cmd_reset_pulse_run() {
@@ -119,26 +158,68 @@ static bool cmd_reset_pulse_run_strict() {
 static bool run_production_sequence(const char *source) {
   Serial.println("========================================");
   Serial.printf("PRODUCTION sequence triggered by %s\n", source);
-  Serial.println("Sequence: e -> w -> v -> R (fail-fast)");
+  Serial.println("Sequence: i -> e -> w -> v -> R (fail-fast)");
   Serial.println("----------------------------------------");
 
+  if (!serial_log::has_serial_next()) {
+    Serial.println("ERROR: Production disabled: next serial not set (use WiFi UI to set it)");
+    return false;
+  }
+
+  String fw_path;
+  if (!select_firmware_path(fw_path)) {
+    Serial.println("ERROR: Production disabled: no valid firmware file selected");
+    return false;
+  }
+
+  // Track attempted steps for summary log.
+  String attempted = "";
+  serial_log::Consumed consumed;
+
+  attempted += 'i';
+  if (!print_idcode_attempt()) {
+    Serial.println("ERROR: Production sequence aborted at step 'i' (IDCODE)");
+    return false;
+  }
+
+  attempted += 'e';
   if (!cmd_erase()) {
     Serial.println("ERROR: Production sequence aborted at step 'e' (erase)");
     return false;
   }
-  if (!cmd_write()) {
-    Serial.println("ERROR: Production sequence aborted at step 'w' (write)");
-    return false;
-  }
-  if (!cmd_verify()) {
-    Serial.println("ERROR: Production sequence aborted at step 'v' (verify)");
-    return false;
-  }
-  if (!cmd_reset_pulse_run_strict()) {
-    Serial.println("ERROR: Production sequence aborted at step 'R' (run)");
+
+  // Consume serial after erase succeeds (before write).
+  consumed = serial_log::consume_after_erase();
+  if (!consumed.valid) {
+    Serial.println("ERROR: Serial consumption failed; aborting");
     return false;
   }
 
+  Serial.printf("Production consumed serial=%lu unique_id=0x%08lX%08lX\n", (unsigned long)consumed.serial,
+                (unsigned long)(consumed.unique_id >> 32), (unsigned long)(consumed.unique_id & 0xFFFFFFFFu));
+
+  attempted += 'w';
+  if (!cmd_write_with_product_info(consumed.serial, consumed.unique_id)) {
+    Serial.println("ERROR: Production sequence aborted at step 'w' (write)");
+    (void)serial_log::append_summary(attempted.c_str(), consumed.serial, /*ok=*/false);
+    return false;
+  }
+
+  attempted += 'v';
+  if (!cmd_verify_with_product_info(consumed.serial, consumed.unique_id)) {
+    Serial.println("ERROR: Production sequence aborted at step 'v' (verify)");
+    (void)serial_log::append_summary(attempted.c_str(), consumed.serial, /*ok=*/false);
+    return false;
+  }
+
+  attempted += 'R';
+  if (!cmd_reset_pulse_run_strict()) {
+    Serial.println("ERROR: Production sequence aborted at step 'R' (run)");
+    (void)serial_log::append_summary(attempted.c_str(), consumed.serial, /*ok=*/false);
+    return false;
+  }
+
+  (void)serial_log::append_summary(attempted.c_str(), consumed.serial, /*ok=*/true);
   Serial.println("PRODUCTION sequence SUCCESS");
   return true;
 }
@@ -182,6 +263,21 @@ static bool cmd_write() {
     return false;
   }
 
+  // For manual 'w' testing, reserve a serial immediately and print it.
+  // Production flow still consumes after 'e'.
+  if (!serial_log::has_serial_next()) {
+    Serial.println("Write FAIL (serial not set; use WiFi UI or 's' command)");
+    return false;
+  }
+  const serial_log::Consumed reserved = serial_log::reserve_for_write();
+  if (!reserved.valid) {
+    Serial.println("Write FAIL (failed to reserve serial)");
+    return false;
+  }
+
+  Serial.printf("Write will use serial=%lu unique_id=0x%08lX%08lX\n", (unsigned long)reserved.serial,
+                (unsigned long)(reserved.unique_id >> 32), (unsigned long)(reserved.unique_id & 0xFFFFFFFFu));
+
   // Benchmark 'w' without changing SWD clock:
   // - keep existing verbose setting for connect reliability
   // - disable verbose only during programming (Serial prints dominate runtime)
@@ -193,7 +289,8 @@ static bool cmd_write() {
     Serial.printf("Write FAIL (could not open firmware file: %s)\n", fw_path.c_str());
     return false;
   }
-  firmware_source::Stm32G0Adapter fw_reader(file_reader);
+  firmware_source::ProductInfoInjectorReader injected(file_reader, reserved.serial, reserved.unique_id);
+  firmware_source::Stm32G0Adapter fw_reader(injected);
 
   const uint32_t t0 = millis();
   const bool connect_ok = stm32g0_prog::connect_and_halt();
@@ -202,6 +299,23 @@ static bool cmd_write() {
   bool prog_ok = false;
   if (connect_ok) {
     swd_min::set_verbose(false);
+
+    // Force first block load + patch, then print debug info.
+    uint8_t tmp[1];
+    uint32_t out_n = 0;
+    (void)injected.read_at(0, tmp, 1, &out_n);
+    const uint8_t *b0 = injected.first_block_ptr();
+    if (b0) {
+      set_first_block_snapshot(b0, firmware_source::ProductInfoInjectorReader::first_block_size());
+      Serial.println("First 256 bytes to be programmed (after injection):");
+      print_hex_dump_16(stm32g0_prog::FLASH_BASE, b0, firmware_source::ProductInfoInjectorReader::first_block_size());
+
+      const uint32_t off = (uint32_t)(PRODUCT_INFO_MEMORY_LOCATION - stm32g0_prog::FLASH_BASE);
+      product_info_struct pi;
+      memcpy(&pi, b0 + off, sizeof(pi));
+      print_product_info_struct(pi);
+    }
+
     prog_ok = stm32g0_prog::flash_program_reader(stm32g0_prog::FLASH_BASE, fw_reader);
     swd_min::set_verbose(prev_verbose);
   }
@@ -223,6 +337,90 @@ static bool cmd_write() {
   return ok;
 }
 
+static void print_hex_dump_16(uint32_t base_addr, const uint8_t *data, uint32_t len) {
+  if (!data) return;
+  for (uint32_t i = 0; i < len; i += 16) {
+    Serial.printf("0x%08lX: ", (unsigned long)(base_addr + i));
+    const uint32_t n = (len - i >= 16) ? 16 : (len - i);
+    for (uint32_t j = 0; j < n; j++) {
+      Serial.printf("%02X ", (unsigned)data[i + j]);
+    }
+    Serial.println();
+  }
+}
+
+static void print_product_info_struct(const product_info_struct &pi) {
+  Serial.println("product_info_struct:");
+  char model[MODEL_CODE_LENGTH + 1];
+  memcpy(model, pi.model_code, MODEL_CODE_LENGTH);
+  model[MODEL_CODE_LENGTH] = 0;
+  Serial.printf("  model_code: '%s'\n", model);
+  Serial.printf("  firmware_compatibility_code: %u\n", (unsigned)pi.firmware_compatibility_code);
+  Serial.printf("  hardware_version: %u.%u.%u\n", (unsigned)pi.hardware_version_major, (unsigned)pi.hardware_version_minor,
+                (unsigned)pi.hardware_version_bugfix);
+  Serial.printf("  serial_number: %lu\n", (unsigned long)pi.serial_number);
+  Serial.printf("  unique_id: 0x%08lX%08lX\n", (unsigned long)(pi.unique_id >> 32),
+                (unsigned long)(pi.unique_id & 0xFFFFFFFFu));
+}
+
+static bool cmd_write_with_product_info(uint32_t serial, uint64_t unique_id) {
+  String fw_path;
+  if (!select_firmware_path(fw_path)) {
+    Serial.println("Write FAIL (no valid firmware file selected)");
+    return false;
+  }
+
+  const bool prev_verbose = swd_min::verbose_enabled();
+
+  firmware_source::FileReader file_reader(SPIFFS);
+  if (!file_reader.open(fw_path.c_str())) {
+    Serial.printf("Write FAIL (could not open firmware file: %s)\n", fw_path.c_str());
+    return false;
+  }
+
+  Serial.printf("Write(prod) using serial=%lu unique_id=0x%08lX%08lX\n", (unsigned long)serial,
+                (unsigned long)(unique_id >> 32), (unsigned long)(unique_id & 0xFFFFFFFFu));
+
+  firmware_source::ProductInfoInjectorReader injected(file_reader, serial, unique_id);
+  firmware_source::Stm32G0Adapter fw_reader(injected);
+
+  const uint32_t t0 = millis();
+  const bool connect_ok = stm32g0_prog::connect_and_halt();
+  const uint32_t t1 = millis();
+
+  bool prog_ok = false;
+  if (connect_ok) {
+    swd_min::set_verbose(false);
+
+    // Ensure first block is materialized so we can snapshot it for subsequent verify.
+    uint8_t tmp[1];
+    uint32_t out_n = 0;
+    (void)injected.read_at(0, tmp, 1, &out_n);
+    const uint8_t *b0 = injected.first_block_ptr();
+    if (b0) {
+      set_first_block_snapshot(b0, firmware_source::ProductInfoInjectorReader::first_block_size());
+    }
+
+    prog_ok = stm32g0_prog::flash_program_reader(stm32g0_prog::FLASH_BASE, fw_reader);
+    swd_min::set_verbose(prev_verbose);
+  }
+  const uint32_t t2 = millis();
+
+  const uint32_t ms_connect = t1 - t0;
+  const uint32_t ms_program = t2 - t1;
+  const uint32_t ms_total = t2 - t0;
+
+  const float prog_s = (ms_program > 0) ? (ms_program / 1000.0f) : 0.0001f;
+  const float kbps = (file_reader.size() / 1024.0f) / prog_s;
+
+  Serial.printf("Benchmark w(prod): connect=%lums program=%lums total=%lums (%.2f KiB/s)\n",
+                (unsigned long)ms_connect, (unsigned long)ms_program, (unsigned long)ms_total, (double)kbps);
+
+  const bool ok = connect_ok && prog_ok;
+  Serial.println(ok ? "Write OK" : "Write FAIL");
+  return ok;
+}
+
 static bool cmd_verify() {
   String fw_path;
   if (!select_firmware_path(fw_path)) {
@@ -235,7 +433,15 @@ static bool cmd_verify() {
     Serial.printf("Verify FAIL (could not open firmware file: %s)\n", fw_path.c_str());
     return false;
   }
+
+  // Verify policy:
+  // - If we have a snapshot of the injected first block, use it for offsets < 256.
+  // - Otherwise verify the raw file for all bytes.
   firmware_source::Stm32G0Adapter fw_reader(file_reader);
+  firmware_source::FirstBlockOverrideReader override0(file_reader,
+                                                      g_first_block_snapshot_valid ? g_first_block_snapshot : nullptr,
+                                                      g_first_block_snapshot_valid ? 256u : 0u);
+  firmware_source::Stm32G0Adapter fw_reader_override(override0);
 
   // Production-oriented verify:
   // - Use aggressive connect-under-reset + immediate halt so user firmware cannot
@@ -252,8 +458,10 @@ static bool cmd_verify() {
   uint32_t mismatches = 0;
   bool verify_ok = false;
   if (connect_ok) {
-    verify_ok = stm32g0_prog::flash_verify_fast_reader(stm32g0_prog::FLASH_BASE, fw_reader, &mismatches,
-                                                       /*max_report=*/8);
+    stm32g0_prog::FirmwareReader &r = g_first_block_snapshot_valid
+                                         ? static_cast<stm32g0_prog::FirmwareReader &>(fw_reader_override)
+                                         : static_cast<stm32g0_prog::FirmwareReader &>(fw_reader);
+    verify_ok = stm32g0_prog::flash_verify_fast_reader(stm32g0_prog::FLASH_BASE, r, &mismatches, /*max_report=*/8);
   }
   const uint32_t t2 = millis();
 
@@ -268,6 +476,68 @@ static bool cmd_verify() {
   const float kbps = (file_reader.size() / 1024.0f) / verify_s;
 
   Serial.printf("Benchmark v: connect=%lums verify=%lums total=%lums (%.2f KiB/s over verify phase)\n",
+                (unsigned long)ms_connect, (unsigned long)ms_verify, (unsigned long)ms_total, (double)kbps);
+  Serial.printf("Verify mismatches: %lu\n", (unsigned long)mismatches);
+
+  const bool ok = connect_ok && verify_ok;
+  Serial.println(ok ? "Verify OK (all bytes match)" : "Verify FAIL");
+  return ok;
+}
+
+static bool cmd_verify_with_product_info(uint32_t serial, uint64_t unique_id) {
+  String fw_path;
+  if (!select_firmware_path(fw_path)) {
+    Serial.println("Verify FAIL (no valid firmware file selected)");
+    return false;
+  }
+
+  firmware_source::FileReader file_reader(SPIFFS);
+  if (!file_reader.open(fw_path.c_str())) {
+    Serial.printf("Verify FAIL (could not open firmware file: %s)\n", fw_path.c_str());
+    return false;
+  }
+
+  Serial.printf("Verify(prod) expecting serial=%lu unique_id=0x%08lX%08lX\n", (unsigned long)serial,
+                (unsigned long)(unique_id >> 32), (unsigned long)(unique_id & 0xFFFFFFFFu));
+
+  // Prefer verifying against the first-block snapshot created during the write.
+  // If snapshot is missing, fall back to re-injecting for verify.
+  firmware_source::FirstBlockOverrideReader override0(file_reader,
+                                                      g_first_block_snapshot_valid ? g_first_block_snapshot : nullptr,
+                                                      g_first_block_snapshot_valid ? 256u : 0u);
+
+  firmware_source::ProductInfoInjectorReader injected(file_reader, serial, unique_id);
+
+  firmware_source::Stm32G0Adapter fw_reader_snapshot(override0);
+  firmware_source::Stm32G0Adapter fw_reader_injected(injected);
+
+  const bool prev_verbose = swd_min::verbose_enabled();
+  swd_min::set_verbose(false);
+
+  const uint32_t t0 = millis();
+  const bool connect_ok = stm32g0_prog::connect_and_halt_under_reset_recovery();
+  const uint32_t t1 = millis();
+
+  uint32_t mismatches = 0;
+  bool verify_ok = false;
+  if (connect_ok) {
+    stm32g0_prog::FirmwareReader &r = g_first_block_snapshot_valid
+                                         ? static_cast<stm32g0_prog::FirmwareReader &>(fw_reader_snapshot)
+                                         : static_cast<stm32g0_prog::FirmwareReader &>(fw_reader_injected);
+    verify_ok = stm32g0_prog::flash_verify_fast_reader(stm32g0_prog::FLASH_BASE, r, &mismatches, /*max_report=*/8);
+  }
+  const uint32_t t2 = millis();
+
+  swd_min::set_verbose(prev_verbose);
+
+  const uint32_t ms_connect = t1 - t0;
+  const uint32_t ms_verify = t2 - t1;
+  const uint32_t ms_total = t2 - t0;
+
+  const float verify_s = (ms_verify > 0) ? (ms_verify / 1000.0f) : 0.0001f;
+  const float kbps = (file_reader.size() / 1024.0f) / verify_s;
+
+  Serial.printf("Benchmark v(prod): connect=%lums verify=%lums total=%lums (%.2f KiB/s)\n",
                 (unsigned long)ms_connect, (unsigned long)ms_verify, (unsigned long)ms_total, (double)kbps);
   Serial.printf("Verify mismatches: %lu\n", (unsigned long)mismatches);
 
@@ -399,8 +669,16 @@ void setup() {
   Serial.println("Wiring: GPIO35=SWCLK GPIO36=SWDIO GPIO37=NRST");
   if (ensure_fs_mounted()) {
     firmware_fs::print_status();
+
+    if (!serial_log::begin(SPIFFS)) {
+      Serial.printf("Serial log init FAIL (%s)\n", serial_log::log_path());
+    }
+    // 's' runs automatically at boot.
+    (void)cmd_sync_serial_from_log();
+
     String fw_path;
     if (firmware_fs::find_single_firmware_bin(fw_path)) {
+      program_state::set_firmware_filename(fw_path);
       File f = SPIFFS.open(fw_path.c_str(), "r");
       if (f) {
         Serial.printf("Selected firmware size: %lu bytes\n", (unsigned long)f.size());
@@ -413,6 +691,9 @@ void setup() {
 
   pinMode(k_prod_button_pin, INPUT_PULLUP);
 
+  // Start WiFi AP + web UI on the other core.
+  wifi_web_ui::start_task();
+
   Serial.printf("SWD verbose: %s (default)\n", swd_min::verbose_enabled() ? "ON" : "OFF");
   Serial.printf("Initial NRST state (driven by ESP32): %s\n", swd_min::nrst_is_high() ? "HIGH" : "LOW");
 
@@ -421,6 +702,48 @@ void setup() {
 
   // Do one attempt automatically on boot.
   print_idcode_attempt();
+}
+
+static bool cmd_sync_serial_from_log() {
+  if (!ensure_fs_mounted()) return false;
+  const serial_log::SyncResult r = serial_log::sync_from_log();
+  if (!r.ok) {
+    Serial.println("Serial sync FAIL (could not read log)");
+    return false;
+  }
+  Serial.printf("Serial log: %s\n", serial_log::log_path());
+  if (!r.has_last) {
+    Serial.println("Serial sync: no valid serial found (log empty or no newline-terminated lines)");
+  } else {
+    Serial.printf("Serial sync: last_serial=%lu (%s) -> next=%lu\n", (unsigned long)r.last_serial,
+                  r.last_was_userset ? "USERSET" : "AUTO", (unsigned long)r.next_serial);
+  }
+
+  if (serial_log::has_serial_next()) {
+    Serial.printf("Next serial (loaded): %lu\n", (unsigned long)serial_log::serial_next());
+  } else {
+    Serial.println("Next serial (loaded): NOT SET (use WiFi UI to set it)");
+  }
+  return true;
+}
+
+static bool cmd_print_log() {
+  if (!ensure_fs_mounted()) return false;
+  File f = SPIFFS.open(serial_log::log_path(), "r");
+  if (!f) {
+    Serial.println("Log open FAIL (missing?)");
+    return false;
+  }
+  Serial.printf("--- %s ---\n", serial_log::log_path());
+  while (f.available()) {
+    const int c = f.read();
+    if (c < 0) break;
+    Serial.write((uint8_t)c);
+  }
+  Serial.println();
+  Serial.println("--- END LOG ---");
+  f.close();
+  return true;
 }
 
 void loop() {
@@ -495,6 +818,58 @@ void loop() {
 
     case 'i':
       print_idcode_attempt();
+      break;
+
+    case 's':
+      cmd_sync_serial_from_log();
+      break;
+
+    case 'S':
+      {
+        // Parse decimal digits that follow 'S' on the same line, e.g. "S12345\n".
+        // If no digits are present, do nothing (keeps it safe for accidental presses).
+        String digits;
+        const uint32_t start_ms = millis();
+        while ((uint32_t)(millis() - start_ms) < 250) {
+          if (!Serial.available()) {
+            delay(1);
+            continue;
+          }
+          const char d = (char)Serial.peek();
+          if (d == '\n' || d == '\r') {
+            (void)Serial.read();
+            break;
+          }
+          if (d >= '0' && d <= '9') {
+            digits += (char)Serial.read();
+          } else {
+            // Consume unexpected char and stop.
+            (void)Serial.read();
+            break;
+          }
+        }
+
+        if (digits.length() == 0) {
+          Serial.println("Set serial: no digits provided; use S<serial> (example: S1000)");
+          break;
+        }
+
+        const uint32_t next = (uint32_t)digits.toInt();
+        if (!ensure_fs_mounted()) {
+          Serial.println("Set serial FAIL (FS not mounted)");
+          break;
+        }
+        if (!serial_log::user_set_serial_next(next)) {
+          Serial.println("Set serial FAIL (persist)");
+          break;
+        }
+        Serial.printf("Set serial OK: USERSET_%lu\n", (unsigned long)next);
+        (void)cmd_sync_serial_from_log();
+      }
+      break;
+
+    case 'l':
+      cmd_print_log();
       break;
 
     case 'R':

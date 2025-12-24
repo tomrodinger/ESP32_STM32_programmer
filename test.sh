@@ -181,6 +181,53 @@ run_step_expect \
   "Read target IDCODE (basic SWD communication sanity check)" \
   "IDCODE" \
   "$PY" "$ROOT_DIR/tools/esp32_runner.py" --skip-build --skip-upload -i
+
+# 4b) Serial log sync + write increments
+run_step_expect \
+  "cmd_s" \
+  "Sync serial from log.txt and print the derived next serial" \
+  "Serial sync:" \
+  "$PY" "$ROOT_DIR/tools/esp32_runner.py" --skip-build --skip-upload -s
+
+# If serial is not set yet, set it to a known value so subsequent tests are deterministic.
+run_step_expect \
+  "cmd_set_serial" \
+  "Set next serial to a known value for testing (appends USERSET_<N>)" \
+  "Set serial OK" \
+  "$PY" "$ROOT_DIR/tools/esp32_runner.py" --skip-build --skip-upload --set-serial 1000
+
+run_step_expect \
+  "cmd_w_serial_1" \
+  "Write once and confirm it prints the serial it will use" \
+  "Write will use serial=" \
+  "$PY" "$ROOT_DIR/tools/esp32_runner.py" --skip-build --skip-upload -w --max 180 --quiet 1.0
+
+run_step_expect \
+  "cmd_w_serial_2" \
+  "Write again and confirm it prints the serial it will use (should increment)" \
+  "Write will use serial=" \
+  "$PY" "$ROOT_DIR/tools/esp32_runner.py" --skip-build --skip-upload -w --max 180 --quiet 1.0
+
+# Confirm the serial number increments by 1 between the two w runs.
+{
+  log1="$TMP_LOG_DIR/cmd_w_serial_1.log"
+  log2="$TMP_LOG_DIR/cmd_w_serial_2.log"
+  s1="$(grep -Eo "Write will use serial=[0-9]+" "$log1" | head -n1 | sed -E 's/.*serial=([0-9]+)/\1/')"
+  s2="$(grep -Eo "Write will use serial=[0-9]+" "$log2" | head -n1 | sed -E 's/.*serial=([0-9]+)/\1/')"
+  if [[ -z "$s1" || -z "$s2" ]]; then
+    fail "cmd_w_serial_increment (could not extract serial numbers from logs)" "$log2"
+  fi
+  if [[ $((s1 + 1)) -ne "$s2" ]]; then
+    fail "cmd_w_serial_increment (expected s2 == s1+1; got s1=$s1 s2=$s2)" "$log2"
+  fi
+  success_box "cmd_w_serial_increment" "serial incremented by 1 (s1=$s1 -> s2=$s2)"
+}
+
+run_step_expect \
+  "cmd_l" \
+  "Print the full serial log to Serial" \
+  "--- /log.txt ---" \
+  "$PY" "$ROOT_DIR/tools/esp32_runner.py" --skip-build --skip-upload -l
 run_step_expect \
   "cmd_e" \
   "Erase target flash and confirm completion" \

@@ -158,23 +158,26 @@ python3 build_and_upload.py -- --space --max 120 --quiet 1.0
     3.  **Run**:
        -   Open the Serial Monitor: `pio device monitor` (baud rate 115200).
        -   Reset the ESP32-S3.
-       -   Use serial commands:
-           - `h` help
-           - `f` filesystem status (LittleFS) + list files
-           - `F` select firmware file (must match `bootloader*.bin` and be unique)
-           - `i` reset + read DP IDCODE
-           - `R` let firmware run: clear debug-halt state, pulse NRST, then release SWD pins
-           - `d` toggle SWD verbose diagnostics (prints DP/AP/memory access details)
-           - `t` SWD smoke test (DP power-up handshake + AHB-AP IDR)
-           - `c` DP CTRL/STAT single-write test (DP[0x04]=0x50000000)
-           - `b` DP ABORT write test (ABORT=0x1E under NRST low then high)
-           - `p` read Program Counter (PC)
-           - `r` read first 8 bytes of target flash @ `0x08000000`
-           - `e` mass erase (connect-under-reset recovery method)
-           - `w` write embedded firmware (prints a timing benchmark)
-           - `v` verify embedded firmware (FAST; prints a timing benchmark)
-           - `a` all (connect+halt, erase, write, verify)
-           - `<space>` **PRODUCTION**: run `e -> w -> v -> R` (fail-fast; aborts on first error)
+        -   Use serial commands:
+            - `h` help
+            - `f` filesystem status (LittleFS) + list files
+            - `F` select firmware file (must match `bootloader*.bin` and be unique)
+            - `i` reset + read DP IDCODE
+            - `s` sync serial from `/log.txt` (re-scan, derive next serial)
+            - `S<serial>` set next serial (append `USERSET_<serial>`), e.g. `S1000`
+            - `l` print `/log.txt` to Serial
+            - `R` let firmware run: clear debug-halt state, pulse NRST, then release SWD pins
+            - `d` toggle SWD verbose diagnostics (prints DP/AP/memory access details)
+            - `t` SWD smoke test (DP power-up handshake + AHB-AP IDR)
+            - `c` DP CTRL/STAT single-write test (DP[0x04]=0x50000000)
+            - `b` DP ABORT write test (ABORT=0x1E under NRST low then high)
+            - `p` read Program Counter (PC)
+            - `r` read first 8 bytes of target flash @ `0x08000000`
+            - `e` mass erase (connect-under-reset recovery method)
+            - `w` write embedded firmware (prints serial + unique_id + injected first-block dump + timing benchmark)
+            - `v` verify embedded firmware (FAST; prints a timing benchmark)
+            - `a` all (connect+halt, erase, write, verify)
+            - `<space>` **PRODUCTION**: run `i -> e -> w -> v -> R` (fail-fast; aborts on first error)
 
 ## Production / jig mode
 
