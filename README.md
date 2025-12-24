@@ -118,6 +118,16 @@ In this edge-only model, the only legal SWDIO transitions are:
 
 ## Usage
 
+### Test runner output
+
+[`test.sh`](test.sh:1) streams each command's output to the console (and also saves it under [`.test_logs/`](.test_logs/:1)).
+
+Each test step prints:
+
+- a highly visible banner describing the **purpose** of the step
+- the exact **command line** being run
+- a highly visible **SUCCESS** box describing **how success was determined** (for example: exit code 0, or a specific expected substring found in the captured log with the first matching line/number)
+
    1.  **Hardware Setup**: Wire the ESP32-S3 and STM32G031 according to the table above.
     2.  **Build & Upload**:
        -   Build the project: `pio run`
