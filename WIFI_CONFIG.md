@@ -100,6 +100,7 @@ Endpoints:
 UI behavior:
 - Page polls `/api/status` every few seconds.
 - User can set next serial; after set, it updates immediately.
+- The UI shows a "Current status" JSON block (e.g. `{ "firmware_filename":"/BL_...", "serial_next":500 }`) just above the "Download Log" button.
 
 ### B) Secrets (not committed)
 
