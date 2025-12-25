@@ -164,6 +164,16 @@ static bool run_production_sequence(const char *source) {
   Serial.println("Sequence: i -> e -> w -> v -> R (fail-fast)");
   Serial.println("----------------------------------------");
 
+  // Fail-safe: do not program if filesystem has almost no free space.
+  // This is required so we don't start a unit and then fail to persist logs.
+  const size_t fs_total = (size_t)SPIFFS.totalBytes();
+  const size_t fs_used = (size_t)SPIFFS.usedBytes();
+  const size_t fs_free = (fs_total > fs_used) ? (fs_total - fs_used) : 0u;
+  if (fs_free < 100u) {
+    Serial.printf("ERROR: Production disabled: filesystem free space too low (%lu bytes)\n", (unsigned long)fs_free);
+    return false;
+  }
+
   if (!serial_log::has_serial_next()) {
     Serial.println("ERROR: Production disabled: next serial not set (use WiFi UI to set it)");
     return false;
@@ -203,26 +213,26 @@ static bool run_production_sequence(const char *source) {
 
   if (!cmd_write_with_product_info(consumed.serial, consumed.unique_id)) {
     Serial.println("ERROR: Production sequence aborted at step 'w' (write)");
-    (void)serial_log::append_summary(completed_steps.c_str(), consumed.serial, /*ok=*/false);
+    (void)serial_log::append_summary_with_unique_id(completed_steps.c_str(), consumed.serial, consumed.unique_id, /*ok=*/false);
     return false;
   }
   completed_steps += 'w';
 
   if (!cmd_verify_with_product_info(consumed.serial, consumed.unique_id)) {
     Serial.println("ERROR: Production sequence aborted at step 'v' (verify)");
-    (void)serial_log::append_summary(completed_steps.c_str(), consumed.serial, /*ok=*/false);
+    (void)serial_log::append_summary_with_unique_id(completed_steps.c_str(), consumed.serial, consumed.unique_id, /*ok=*/false);
     return false;
   }
   completed_steps += 'v';
 
   if (!cmd_reset_pulse_run_strict()) {
     Serial.println("ERROR: Production sequence aborted at step 'R' (run)");
-    (void)serial_log::append_summary(completed_steps.c_str(), consumed.serial, /*ok=*/false);
+    (void)serial_log::append_summary_with_unique_id(completed_steps.c_str(), consumed.serial, consumed.unique_id, /*ok=*/false);
     return false;
   }
   completed_steps += 'R';
 
-  (void)serial_log::append_summary(completed_steps.c_str(), consumed.serial, /*ok=*/true);
+  (void)serial_log::append_summary_with_unique_id(completed_steps.c_str(), consumed.serial, consumed.unique_id, /*ok=*/true);
   Serial.println("PRODUCTION sequence SUCCESS");
   return true;
 }

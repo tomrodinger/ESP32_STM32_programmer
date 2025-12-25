@@ -73,11 +73,18 @@ struct RecordsSyncResult {
 // - Otherwise invalidate serial_next (production disabled until user sets).
 RecordsSyncResult sync_from_consumed_records();
 
-struct Consumed {
-  bool valid = false;
-  uint32_t serial = 0;
-  uint64_t unique_id = 0;
-};
+  struct Consumed {
+    bool valid = false;
+    uint32_t serial = 0;
+    uint64_t unique_id = 0;
+  };
+
+// Conservative estimate of how many bytes of SPIFFS storage are required per
+// successfully programmed unit.
+//
+// This estimate is intentionally pessimistic so that any derived
+// "units_remaining" count will be an under-estimate.
+uint32_t bytes_per_unit_estimate();
 
 // Consume the current serial for an upcoming write/program operation.
 //
@@ -90,10 +97,18 @@ struct Consumed {
 //   contain only the final summary line per unit.
 Consumed consume_for_write();
 
-// Append summary line with attempted step letters.
-// - For success: <steps>_<serial>_OK
-// - For failure: <steps>_<serial>_FAIL
-bool append_summary(const char *steps, uint32_t serial, bool ok);
+  // Append summary line with attempted step letters.
+  // - For success: <steps>_<serial>_<unique_id_hex16>_OK
+  // - For failure: <steps>_<serial>_<unique_id_hex16>_FAIL
+  //
+  // Example:
+  //   iewvR_1003_0123456789ABCDEF_OK
+  bool append_summary_with_unique_id(const char *steps, uint32_t serial, uint64_t unique_id, bool ok);
+
+  // Legacy format (kept for compatibility with older logs/tools):
+  // - For success: <steps>_<serial>_OK
+  // - For failure: <steps>_<serial>_FAIL
+  bool append_summary(const char *steps, uint32_t serial, bool ok);
 
 // For debug/status printing.
 const char *log_path();

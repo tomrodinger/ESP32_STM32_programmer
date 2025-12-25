@@ -193,6 +193,35 @@ Triggers:
 Note: ensure your serial terminal is configured to send keystrokes immediately (character mode). For automated testing,
 use [`tools/esp32_runner.py`](tools/esp32_runner.py:1) with `--space`.
 
+## Production logging + filesystem safety
+
+Production writes are **disabled** when the SPIFFS filesystem hosting logs has less than **100 bytes** free.
+
+### `log.txt` format
+
+After finishing programming one target (success or failure), a single summary line is appended to `log.txt`:
+
+```
+<steps>_<serial>_<unique_id_hex16>_<OK|FAIL>
+```
+
+Example (success):
+
+```
+iewvR_1003_0123456789ABCDEF_OK
+```
+
+### Web status fields
+
+The web UI `/api/status` JSON now includes filesystem usage and an estimate of units remaining:
+
+- `fs_total_bytes`
+- `fs_used_bytes`
+- `fs_free_bytes`
+- `fs_ok` (false when free < 100 bytes)
+- `bytes_per_unit_estimate`
+- `units_remaining_estimate`
+
 ### GPIO45 jig button wiring
 
 - Configure: **GPIO45 = `INPUT_PULLUP`** in firmware (internal pull-up enabled)

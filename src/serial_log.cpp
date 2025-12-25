@@ -11,6 +11,8 @@ namespace serial_log {
 static constexpr const char *k_log_path = "/log.txt";
 static constexpr const char *k_consumed_records_path = "/serial_consumed.bin";
 
+static constexpr uint32_t k_unique_id_hex_len = 16u;
+
 // In-memory state guarded by a mutex.
 static SemaphoreHandle_t g_mu = nullptr;
 static bool g_has_next = false;
@@ -37,6 +39,30 @@ static bool append_line(const char *line) {
   f.flush();
   f.close();
   return w == n;
+}
+
+uint32_t bytes_per_unit_estimate() {
+  // Estimate how many SPIFFS bytes are consumed per unit attempt.
+  //
+  // We want to under-estimate units remaining, so this estimate is slightly
+  // pessimistic, but still simple and representative.
+  //
+  // Successful/failure log line format:
+  //   <steps>_<serial>_<unique_id_hex16>_OK\n
+  // Additionally, before programming we append one uint32_t to
+  // /serial_consumed.bin (4 bytes).
+
+  // Representative (slightly pessimistic) example line.
+  static constexpr const char *k_example_line = "iewvR_99999_0123456789ABCDEF_OK\n";
+  const uint32_t log_line_bytes = (uint32_t)strlen(k_example_line);
+
+  // One consumed-serial record entry (little-endian uint32).
+  static constexpr uint32_t k_consumed_record_bytes = 4u;
+
+  // Small slack for SPIFFS allocation granularity / minor future expansion.
+  static constexpr uint32_t k_overhead_bytes = 16u;
+
+  return log_line_bytes + k_consumed_record_bytes + k_overhead_bytes;
 }
 
 static bool append_consumed_u32(uint32_t v) {
@@ -342,6 +368,22 @@ bool append_summary(const char *steps, uint32_t serial, bool ok) {
   if (!steps) return false;
   char line[80];
   const int n = snprintf(line, sizeof(line), "%s_%lu_%s\n", steps, (unsigned long)serial, ok ? "OK" : "FAIL");
+  if (n <= 0 || (size_t)n >= sizeof(line)) return false;
+  return append_line(line);
+}
+
+bool append_summary_with_unique_id(const char *steps, uint32_t serial, uint64_t unique_id, bool ok) {
+  if (!steps) return false;
+
+  // Format unique_id as fixed-width 16 hex characters (upper-case) without 0x prefix.
+  // Print using two 32-bit chunks to avoid %llX portability surprises on embedded libc.
+  const uint32_t hi = (uint32_t)(unique_id >> 32);
+  const uint32_t lo = (uint32_t)(unique_id & 0xFFFFFFFFu);
+
+  // Size: steps(<=16) + '_' + serial(<=10) + '_' + 16 + '_' + FAIL + '\n' + NUL
+  char line[96];
+  const int n = snprintf(line, sizeof(line), "%s_%lu_%08lX%08lX_%s\n", steps, (unsigned long)serial, (unsigned long)hi,
+                         (unsigned long)lo, ok ? "OK" : "FAIL");
   if (n <= 0 || (size_t)n >= sizeof(line)) return false;
   return append_line(line);
 }

@@ -4,7 +4,7 @@
 
 --- /log.txt ---
 USERSET_1000
-iewvR_1003_OK
+re:^iewvR_1003_[0-9A-F]{16}_OK
 --- END /log.txt ---
 --- /serial_consumed.bin ---
 0 (USERSET marker; next entry is next-serial seed)

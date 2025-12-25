@@ -277,8 +277,19 @@ run_step_expect \
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
     [[ "$line" =~ ^# ]] && continue
-    if ! grep -Fq -- "$line" "$logl"; then
-      fail "cmd_l_reference_mismatch (missing expected line: $line)" "$logl"
+
+    # Support regex expectations for dynamic values (e.g. unique_id).
+    # If a reference line begins with "re:", treat the remainder as an ERE
+    # and match it using grep -E.
+    if [[ "$line" =~ ^re: ]]; then
+      re="${line#re:}"
+      if ! grep -Eq -- "$re" "$logl"; then
+        fail "cmd_l_reference_mismatch (missing expected regex: $re)" "$logl"
+      fi
+    else
+      if ! grep -Fq -- "$line" "$logl"; then
+        fail "cmd_l_reference_mismatch (missing expected line: $line)" "$logl"
+      fi
     fi
   done < "$ref"
   success_box "cmd_l_reference" "cmd_l output contained all required reference lines from $ref"

@@ -76,6 +76,8 @@ static const char k_index_html[] PROGMEM =
     "<h2>Gearotons M17 Programming and Testing Jig</h2>"
     "<p>Firmware file: <code id='fw'>...</code></p>"
     "<p>Next serial: <code id='sn'>...</code></p>"
+    "<p>Filesystem free: <code id='fsfree'>...</code> bytes (est. <code id='unitsleft'>...</code> units left)</p>"
+    "<p>Programming enabled: <code id='progok'>...</code></p>"
     "<div style='margin-top:12px'>"
     "  <input id='setv' type='number' min='0' step='1' style='width:220px' placeholder='Set next serial'/>"
     "  <button onclick='setSerial()'>Set</button>"
@@ -108,7 +110,10 @@ static const char k_index_html[] PROGMEM =
     "  const j=await r.json();\n"
     "  document.getElementById('fw').textContent=j.firmware_filename||'';\n"
     "  document.getElementById('sn').textContent=String(j.serial_next||0);\n"
-    "  document.getElementById('statusjson').textContent=JSON.stringify({firmware_filename:(j.firmware_filename||''),serial_next:(j.serial_next||0)});\n"
+    "  document.getElementById('fsfree').textContent=String(j.fs_free_bytes||0);\n"
+    "  document.getElementById('unitsleft').textContent=String(j.units_remaining_estimate||0);\n"
+    "  document.getElementById('progok').textContent=(j.fs_ok? 'YES':'NO');\n"
+    "  document.getElementById('statusjson').textContent=JSON.stringify(j);\n"
     "}\n"
     "async function setSerial(){\n"
     "  const v=document.getElementById('setv').value;\n"
@@ -132,7 +137,15 @@ static void send_status_json() {
   const String fw_path = program_state::firmware_filename();
   const uint32_t sn = serial_log::serial_next();
 
-  // Minimal JSON response as planned: { firmware_filename, serial_next }
+  const size_t fs_total = (size_t)SPIFFS.totalBytes();
+  const size_t fs_used = (size_t)SPIFFS.usedBytes();
+  const size_t fs_free = (fs_total > fs_used) ? (fs_total - fs_used) : 0u;
+  const bool fs_ok = fs_free >= 100u;
+
+  const uint32_t bytes_per_unit = serial_log::bytes_per_unit_estimate();
+  const uint32_t units_remaining = (bytes_per_unit > 0u) ? (uint32_t)(fs_free / (size_t)bytes_per_unit) : 0u;
+
+  // Status JSON response.
   String json = "{";
   json += "\"firmware_filename\":";
   if (fw_path.length() > 0) {
@@ -141,6 +154,12 @@ static void send_status_json() {
     json += "\"\"";
   }
   json += ",\"serial_next\":" + String((unsigned long)sn);
+  json += ",\"fs_total_bytes\":" + String((unsigned long)fs_total);
+  json += ",\"fs_used_bytes\":" + String((unsigned long)fs_used);
+  json += ",\"fs_free_bytes\":" + String((unsigned long)fs_free);
+  json += ",\"fs_ok\":" + String(fs_ok ? "true" : "false");
+  json += ",\"bytes_per_unit_estimate\":" + String((unsigned long)bytes_per_unit);
+  json += ",\"units_remaining_estimate\":" + String((unsigned long)units_remaining);
   json += "}";
 
   g_server.send(200, "application/json", json);
