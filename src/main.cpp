@@ -75,7 +75,7 @@ static void print_help() {
   Serial.println("Commands:");
   Serial.println("  h = help");
   Serial.println("  f = filesystem status (SPIFFS) + list files");
-  Serial.println("  F = select firmware file (must match BL*; exactly one match required)");
+  Serial.println("  F = select firmware file (uses active selection; auto-select if exactly one BL* exists)");
   Serial.println("  i = reset + read DP IDCODE");
   Serial.println("  s = consume a serial and append it to consumed-serial record (test only)");
   Serial.println("  S<serial> = set next serial (append USERSET_<serial>) (example: S1000)");
@@ -110,9 +110,19 @@ static bool ensure_fs_mounted() {
 
 static bool select_firmware_path(String &out_path) {
   if (!ensure_fs_mounted()) return false;
-  const bool ok = firmware_fs::find_single_firmware_bin(out_path);
-  if (ok) program_state::set_firmware_filename(out_path);
-  return ok;
+  bool auto_sel = false;
+  const bool ok = firmware_fs::reconcile_active_selection_ex(&out_path, &auto_sel);
+  if (!ok) {
+    program_state::set_firmware_filename("");
+    return false;
+  }
+  program_state::set_firmware_filename(out_path);
+
+  if (auto_sel && out_path.startsWith("/")) {
+    const String base = out_path.substring(1);
+    if (base.length() > 0) (void)serial_log::append_event("AUTOSELECT", base.c_str());
+  }
+  return true;
 }
 
 static void cmd_reset_pulse_run() {
@@ -695,13 +705,22 @@ void setup() {
     }
 
     String fw_path;
-    if (firmware_fs::find_single_firmware_bin(fw_path)) {
+    bool auto_sel = false;
+    if (firmware_fs::reconcile_active_selection_ex(&fw_path, &auto_sel)) {
       program_state::set_firmware_filename(fw_path);
       File f = SPIFFS.open(fw_path.c_str(), "r");
       if (f) {
         Serial.printf("Selected firmware size: %lu bytes\n", (unsigned long)f.size());
         f.close();
       }
+      if (auto_sel) {
+        String base = fw_path;
+        if (base.startsWith("/")) base = base.substring(1);
+        (void)serial_log::append_event("AUTOSELECT", base.c_str());
+      }
+    } else {
+      program_state::set_firmware_filename("");
+      Serial.println("Firmware selection: NOT SELECTED (use WiFi UI; programming disabled)");
     }
   }
 
