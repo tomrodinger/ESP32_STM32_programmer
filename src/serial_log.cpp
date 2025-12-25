@@ -41,6 +41,15 @@ static bool append_line(const char *line) {
   return w == n;
 }
 
+bool append_event(const char *tag, const char *value) {
+  if (!tag || !value) return false;
+  // Keep it short/deterministic. Value is expected to be a small token (e.g. firmware basename).
+  char line[96];
+  const int n = snprintf(line, sizeof(line), "%s_%s\n", tag, value);
+  if (n <= 0 || (size_t)n >= sizeof(line)) return false;
+  return append_line(line);
+}
+
 uint32_t bytes_per_unit_estimate() {
   // Estimate how many SPIFFS bytes are consumed per unit attempt.
   //

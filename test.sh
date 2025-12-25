@@ -159,6 +159,17 @@ run_step_no_warnings \
   "Compile firmware; treat any warnings as failures" \
   "$PY" "$ROOT_DIR/tools/esp32_runner.py" --skip-upload
 
+# 2b) Host-side unit tests (no hardware).
+run_step \
+  "host_unit_firmware_name" \
+  "Validate firmware filename normalization rules (host-side C++ unit test)" \
+  /usr/bin/clang++ -std=c++17 -Wall -Wextra -Wpedantic -Werror \
+  "$ROOT_DIR/testdata/test_firmware_name_utils.cpp" \
+  "$ROOT_DIR/src/firmware_name_utils.cpp" \
+  -I"$ROOT_DIR" \
+  -o "$TMP_LOG_DIR/test_firmware_name_utils" \
+  && "$TMP_LOG_DIR/test_firmware_name_utils"
+
 # 3) Upload firmware.
 run_step \
   "fw_upload" \

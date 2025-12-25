@@ -40,6 +40,14 @@ uint32_t serial_next();
 // Append USERSET_<serial> and update in-memory serial_next.
 bool user_set_serial_next(uint32_t next);
 
+// Append an event line to /log.txt in the form:
+//   <TAG>_<value>\n
+//
+// Intended for audit trails of user/system actions.
+//
+// Returns true on success.
+bool append_event(const char *tag, const char *value);
+
 // Consumed-serial record file (append-only) in SPIFFS.
 //
 // Format: little-endian uint32_t entries appended back-to-back.

@@ -10,6 +10,7 @@
 build/
 **/build/
 sim/build_idle0/
+.test_logs/
 *.o
 *.obj
 *.elf

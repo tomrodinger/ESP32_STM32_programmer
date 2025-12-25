@@ -19,6 +19,59 @@
 
 4) Serial consumption rule: after `e` succeeds (just before `w`), consume a serial number. `w` uses the consumed serial.
 
+## Feature: firmware file management from the Web UI (upload + store multiple + select active + delete)
+
+### Overview
+
+The device stores **multiple firmware binaries** on the `fwfs` SPIFFS partition.
+
+- Stored firmware files are identified by basename pattern: `BL*`
+- One firmware file can be marked as **active** and will be used for `w`/`v` and production (`<space>`).
+- The active selection is stored **non-volatile** (persisted on the filesystem).
+
+### Programming enable/disable rule
+
+- If **no active firmware is selected**, programming is **disabled**.
+  - In this state, `w`, `v`, and the production sequence must fail-fast with a clear error.
+
+### Auto-selection rules (state machine)
+
+To reduce operator mistakes, firmware selection is automatically adjusted under certain conditions:
+
+1) **Boot-time**
+   - If a persisted active selection exists and the file still exists (`BL*`), it becomes active.
+   - If the persisted selection is missing/invalid:
+     - If there is **exactly one** `BL*` file, it is automatically selected.
+     - Otherwise, the device enters an **unselected** state (programming disabled).
+
+2) **After upload / delete**
+   - If the active firmware file is deleted, the device becomes **unselected** *unless* exactly one `BL*` file remains, in which case that remaining file is auto-selected.
+   - If no firmware is selected but the system observes that there is now exactly one `BL*` file (e.g. after an upload or after deleting down to one file), it is auto-selected.
+
+### Upload rules (filename normalization)
+
+The browser will upload a firmware file whose original filename is typically long (>31 chars) and usually ends with `.bin`.
+
+Because SPIFFS object names are length-limited, the firmware must normalize and validate the filename before storing:
+
+1) The incoming filename must start with the literal prefix `bootloader`.
+2) The stored filename is derived by:
+   - Replacing the leading `bootloader` with `BL`.
+   - Removing a trailing `.bin` extension (case-insensitive) if present.
+3) The resulting stored **basename** (no leading `/`) must be **31 characters or fewer**.
+   - If it is still too long after normalization, the upload is rejected and an error is returned.
+4) The stored file is written into the filesystem root as `/<basename>`.
+
+### List + select + delete behavior (Web UI)
+
+The Web UI provides firmware management controls:
+
+- **List**: show all stored firmware files matching `BL*`.
+- **Select**: choose which `BL*` file is active.
+- **Delete**: remove a stored `BL*` file.
+  - Delete requires a **confirmation popup** to prevent accidental clicks.
+  - If the deleted file was active, selection is cleared and the auto-selection rules apply.
+
 ## Implementation status (this repo)
 
 - Serial log is implemented at [`serial_log::begin()`](src/serial_log.cpp:73) and stored at `/log.txt` on the `fwfs` SPIFFS partition.

@@ -3,6 +3,7 @@
 # Updating this reference requires explicit human approval.
 
 --- /log.txt ---
+re:^(AUTOSELECT|USERSELECT)_[A-Za-z0-9_.-].*
 USERSET_1000
 re:^iewvR_1003_[0-9A-F]{16}_OK
 --- END /log.txt ---
