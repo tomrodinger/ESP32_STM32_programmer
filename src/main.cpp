@@ -52,7 +52,7 @@ static bool cmd_verify_with_product_info(uint32_t serial, uint64_t unique_id);
 
 static void print_hex_dump_16(uint32_t base_addr, const uint8_t *data, uint32_t len);
 static void print_product_info_struct(const product_info_struct &pi);
-static bool cmd_sync_serial_from_log();
+static bool cmd_consume_serial_record_only();
 static bool cmd_print_log();
 
 static void print_user_pressed_banner(char c) {
@@ -74,7 +74,7 @@ static void print_help() {
   Serial.println("  f = filesystem status (SPIFFS) + list files");
   Serial.println("  F = select firmware file (must match BL*; exactly one match required)");
   Serial.println("  i = reset + read DP IDCODE");
-  Serial.println("  s = sync serial from log.txt (re-scan log, load next serial)");
+  Serial.println("  s = consume a serial and append it to consumed-serial record (test only)");
   Serial.println("  S<serial> = set next serial (append USERSET_<serial>) (example: S1000)");
   Serial.println("  l = print /log.txt to Serial");
   Serial.println("  R = let firmware run: clear debug-halt state, pulse NRST, then release SWD pins");
@@ -172,24 +172,24 @@ static bool run_production_sequence(const char *source) {
     return false;
   }
 
-  // Track attempted steps for summary log.
-  String attempted = "";
+  // Track successful steps for summary log.
+  String completed_steps = "";
   serial_log::Consumed consumed;
 
-  attempted += 'i';
   if (!print_idcode_attempt()) {
     Serial.println("ERROR: Production sequence aborted at step 'i' (IDCODE)");
     return false;
   }
+  completed_steps += 'i';
 
-  attempted += 'e';
   if (!cmd_erase()) {
     Serial.println("ERROR: Production sequence aborted at step 'e' (erase)");
     return false;
   }
+  completed_steps += 'e';
 
-  // Consume serial after erase succeeds (before write).
-  consumed = serial_log::consume_after_erase();
+  // Consume serial at the beginning of the 'w' phase.
+  consumed = serial_log::consume_for_write();
   if (!consumed.valid) {
     Serial.println("ERROR: Serial consumption failed; aborting");
     return false;
@@ -198,28 +198,28 @@ static bool run_production_sequence(const char *source) {
   Serial.printf("Production consumed serial=%lu unique_id=0x%08lX%08lX\n", (unsigned long)consumed.serial,
                 (unsigned long)(consumed.unique_id >> 32), (unsigned long)(consumed.unique_id & 0xFFFFFFFFu));
 
-  attempted += 'w';
   if (!cmd_write_with_product_info(consumed.serial, consumed.unique_id)) {
     Serial.println("ERROR: Production sequence aborted at step 'w' (write)");
-    (void)serial_log::append_summary(attempted.c_str(), consumed.serial, /*ok=*/false);
+    (void)serial_log::append_summary(completed_steps.c_str(), consumed.serial, /*ok=*/false);
     return false;
   }
+  completed_steps += 'w';
 
-  attempted += 'v';
   if (!cmd_verify_with_product_info(consumed.serial, consumed.unique_id)) {
     Serial.println("ERROR: Production sequence aborted at step 'v' (verify)");
-    (void)serial_log::append_summary(attempted.c_str(), consumed.serial, /*ok=*/false);
+    (void)serial_log::append_summary(completed_steps.c_str(), consumed.serial, /*ok=*/false);
     return false;
   }
+  completed_steps += 'v';
 
-  attempted += 'R';
   if (!cmd_reset_pulse_run_strict()) {
     Serial.println("ERROR: Production sequence aborted at step 'R' (run)");
-    (void)serial_log::append_summary(attempted.c_str(), consumed.serial, /*ok=*/false);
+    (void)serial_log::append_summary(completed_steps.c_str(), consumed.serial, /*ok=*/false);
     return false;
   }
+  completed_steps += 'R';
 
-  (void)serial_log::append_summary(attempted.c_str(), consumed.serial, /*ok=*/true);
+  (void)serial_log::append_summary(completed_steps.c_str(), consumed.serial, /*ok=*/true);
   Serial.println("PRODUCTION sequence SUCCESS");
   return true;
 }
@@ -263,13 +263,12 @@ static bool cmd_write() {
     return false;
   }
 
-  // For manual 'w' testing, reserve a serial immediately and print it.
-  // Production flow still consumes after 'e'.
+  // For manual 'w' testing, consume a serial immediately and print it.
   if (!serial_log::has_serial_next()) {
     Serial.println("Write FAIL (serial not set; use WiFi UI or 's' command)");
     return false;
   }
-  const serial_log::Consumed reserved = serial_log::reserve_for_write();
+  const serial_log::Consumed reserved = serial_log::consume_for_write();
   if (!reserved.valid) {
     Serial.println("Write FAIL (failed to reserve serial)");
     return false;
@@ -673,8 +672,11 @@ void setup() {
     if (!serial_log::begin(SPIFFS)) {
       Serial.printf("Serial log init FAIL (%s)\n", serial_log::log_path());
     }
-    // 's' runs automatically at boot.
-    (void)cmd_sync_serial_from_log();
+    if (serial_log::has_serial_next()) {
+      Serial.printf("Next serial (loaded): %lu\n", (unsigned long)serial_log::serial_next());
+    } else {
+      Serial.println("Next serial (loaded): NOT SET (use WiFi UI to set it)");
+    }
 
     String fw_path;
     if (firmware_fs::find_single_firmware_bin(fw_path)) {
@@ -704,26 +706,19 @@ void setup() {
   print_idcode_attempt();
 }
 
-static bool cmd_sync_serial_from_log() {
+static bool cmd_consume_serial_record_only() {
   if (!ensure_fs_mounted()) return false;
-  const serial_log::SyncResult r = serial_log::sync_from_log();
-  if (!r.ok) {
-    Serial.println("Serial sync FAIL (could not read log)");
+  if (!serial_log::has_serial_next()) {
+    Serial.println("Consume serial FAIL (serial not set; use WiFi UI)");
     return false;
   }
-  Serial.printf("Serial log: %s\n", serial_log::log_path());
-  if (!r.has_last) {
-    Serial.println("Serial sync: no valid serial found (log empty or no newline-terminated lines)");
-  } else {
-    Serial.printf("Serial sync: last_serial=%lu (%s) -> next=%lu\n", (unsigned long)r.last_serial,
-                  r.last_was_userset ? "USERSET" : "AUTO", (unsigned long)r.next_serial);
+  const serial_log::Consumed c = serial_log::consume_for_write();
+  if (!c.valid) {
+    Serial.println("Consume serial FAIL (could not append to consumed record)");
+    return false;
   }
-
-  if (serial_log::has_serial_next()) {
-    Serial.printf("Next serial (loaded): %lu\n", (unsigned long)serial_log::serial_next());
-  } else {
-    Serial.println("Next serial (loaded): NOT SET (use WiFi UI to set it)");
-  }
+  Serial.printf("Consume serial OK: consumed=%lu next=%lu\n", (unsigned long)c.serial,
+                (unsigned long)serial_log::serial_next());
   return true;
 }
 
@@ -821,7 +816,7 @@ void loop() {
       break;
 
     case 's':
-      cmd_sync_serial_from_log();
+      cmd_consume_serial_record_only();
       break;
 
     case 'S':
@@ -864,7 +859,11 @@ void loop() {
           break;
         }
         Serial.printf("Set serial OK: USERSET_%lu\n", (unsigned long)next);
-        (void)cmd_sync_serial_from_log();
+        if (serial_log::has_serial_next()) {
+          Serial.printf("Next serial (loaded): %lu\n", (unsigned long)serial_log::serial_next());
+        } else {
+          Serial.println("Next serial (loaded): NOT SET (use WiFi UI to set it)");
+        }
       }
       break;
 

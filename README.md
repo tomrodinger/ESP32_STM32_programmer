@@ -163,7 +163,7 @@ python3 build_and_upload.py -- --space --max 120 --quiet 1.0
             - `f` filesystem status (LittleFS) + list files
             - `F` select firmware file (must match `bootloader*.bin` and be unique)
             - `i` reset + read DP IDCODE
-            - `s` sync serial from `/log.txt` (re-scan, derive next serial)
+            - `s` consume a serial and append it to consumed-serial record (test only)
             - `S<serial>` set next serial (append `USERSET_<serial>`), e.g. `S1000`
             - `l` print `/log.txt` to Serial
             - `R` let firmware run: clear debug-halt state, pulse NRST, then release SWD pins

@@ -23,6 +23,38 @@
 
 - Serial log is implemented at [`serial_log::begin()`](src/serial_log.cpp:73) and stored at `/log.txt` on the `fwfs` SPIFFS partition.
 - Web UI is implemented in [`wifi_web_ui::start_task()`](src/wifi_web_ui.cpp:138) (WiFi AP + HTTP server), pinned to core 0.
+
+## Feature: consumed serial number records + dual log views
+
+In addition to the human-readable append-only `/log.txt`, firmware maintains a **binary append-only** file of consumed serial numbers:
+
+- Path: [`serial_log::consumed_records_path()`](src/serial_log.cpp:21) (currently `/serial_consumed.bin`)
+- Format: repeated **little-endian `uint32_t`** entries.
+- Special marker: `0x00000000` indicates the consumed-record sequence is invalidated and **must be followed by** the new user-set `serial_next` value.
+
+### Boot-time policy (safety against serial reuse)
+
+On boot, the firmware scans the last two `uint32_t` entries from the consumed-record file and derives `serial_next`:
+
+- If the file is missing: production must be disabled until the user sets the serial number.
+- If file size is not a multiple of 4: treat as corruption; production disabled until the user sets the serial number. When the user sets the serial number under the condition of corruption, we will append zeros to the file until it is a multiple of 4, then append the 0x00000000 marker followed by the user-set serial number.
+- If file size is only 4 bytes (one entry): cannot validate; production disabled until the user sets the serial number.
+- If the second-to-last entry is `0x00000000`: allow production and take the last entry **without increment** as `serial_next`.
+- If the last two entries are sequential (`prev + 1 == last`): allow production and set `serial_next = last + 1`.
+- Otherwise (non-sequential): production disabled until the user sets the serial.
+
+### Production flow policy
+
+- Serial consumption is performed at the **start of the `w` (write) phase**.
+- The consumed serial is appended to the consumed-record file and the file is flushed+closed **before programming begins**.
+- `/log.txt` contains only the final per-unit summary line `..._<serial>_OK|FAIL` (no intermediate `e_<serial>` marker).
+
+### Web UI log download
+
+When pressing "Download Logs" in the Web UI, two scrollable windows are shown:
+
+1) **Consumed serial records**: the binary file decoded to one decimal serial per line.
+2) **log.txt**: the plain text production summary log.
 - Product-info injection is implemented in [`firmware_source::ProductInfoInjectorReader`](src/product_info_injector_reader.h:1):
   - Reads the first 256-byte block, patches `serial_number` + `unique_id` inside the `product_info_struct`, then serves patched bytes.
   - All remaining bytes are pass-through from SPIFFS.

@@ -185,8 +185,8 @@ run_step_expect \
 # 4b) Serial log sync + write increments
 run_step_expect \
   "cmd_s" \
-  "Sync serial from log.txt and print the derived next serial" \
-  "Serial sync:" \
+  "Consume a serial and append it to consumed-serial record (test only)" \
+  "Consume serial" \
   "$PY" "$ROOT_DIR/tools/esp32_runner.py" --skip-build --skip-upload -s
 
 # If serial is not set yet, set it to a known value so subsequent tests are deterministic.

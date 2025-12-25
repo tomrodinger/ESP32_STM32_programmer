@@ -130,7 +130,7 @@ def _send_cmd_and_capture(ser: "serial.Serial", cmd_char: str, quiet_s: float, m
     elif lead == "v":
         stop_markers = ["Verify OK", "Verify FAIL"]
     elif lead == "s":
-        stop_markers = ["Serial sync:", "Serial sync FAIL"]
+        stop_markers = ["Consume serial OK:", "Consume serial FAIL"]
     elif lead == "l":
         stop_markers = ["--- /log.txt ---", "Log open FAIL"]
     elif lead == "S":

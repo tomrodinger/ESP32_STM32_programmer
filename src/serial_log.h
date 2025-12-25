@@ -29,7 +29,9 @@ struct SyncResult {
 // - If last valid line is USERSET_<N>, next_serial=N.
 // - Otherwise next_serial=last_serial+1.
 //
-// This is used by the 's' command and runs automatically at boot.
+// NOTE: This is *not* used to drive production serial allocation anymore.
+// Production uses the consumed-serial record file as the source of truth to
+// avoid serial reuse after crashes.
 SyncResult sync_from_log();
 
 bool has_serial_next();
@@ -38,21 +40,55 @@ uint32_t serial_next();
 // Append USERSET_<serial> and update in-memory serial_next.
 bool user_set_serial_next(uint32_t next);
 
+// Consumed-serial record file (append-only) in SPIFFS.
+//
+// Format: little-endian uint32_t entries appended back-to-back.
+// Special marker: 0x00000000 indicates the sequence has been invalidated
+// (followed by the new user-set next serial).
+const char *consumed_records_path();
+
+struct RecordsSyncResult {
+  bool ok = false;
+
+  bool has_last = false;
+  uint32_t last = 0;
+
+  bool has_prev = false;
+  uint32_t prev = 0;
+
+  bool has_next = false;
+  uint32_t next = 0;
+
+  // True when the last two entries are acceptable for deriving next:
+  // - prev == 0 (user-set marker)
+  // - OR last == prev + 1
+  bool sequence_ok = false;
+};
+
+// Re-scan consumed serial record file and derive serial_next.
+//
+// Policy (per production requirements):
+// - If prev==0 (user-set marker), set next=last (no increment).
+// - If last two entries are sequential (prev+1==last), set next=last+1.
+// - Otherwise invalidate serial_next (production disabled until user sets).
+RecordsSyncResult sync_from_consumed_records();
+
 struct Consumed {
   bool valid = false;
   uint32_t serial = 0;
   uint64_t unique_id = 0;
 };
 
-// Consume serial after 'e' succeeds.
+// Consume the current serial for an upcoming write/program operation.
+//
+// Contract:
 // - Requires that serial_next is valid.
-// - Appends e_<serial>\n.
-// - Increments in-memory serial_next to serial+1.
-Consumed consume_after_erase();
-
-// For manual 'w' command testing: reserve a serial immediately.
-// Appends w_<serial>\n and advances next serial to serial+1.
-Consumed reserve_for_write();
+// - Appends the consumed serial to the binary consumed-records file (and closes
+//   it) BEFORE the caller begins writing firmware to the target.
+// - Advances in-memory serial_next to serial+1.
+// - Does NOT append any intermediate marker to /log.txt; production log should
+//   contain only the final summary line per unit.
+Consumed consume_for_write();
 
 // Append summary line with attempted step letters.
 // - For success: <steps>_<serial>_OK

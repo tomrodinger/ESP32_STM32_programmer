@@ -44,10 +44,20 @@ static const char k_index_html[] PROGMEM =
     "background:#f7f7f7;border:1px solid #ddd;padding:8px'></pre>"
     "</div>"
     "<div style='margin-top:12px'>"
-    "  <button onclick='downloadLog()'>Download Log</button>"
+    "  <button onclick='downloadLogs()'>Download Logs</button>"
     "</div>"
-    "<div id='logbox' style='margin-top:12px;white-space:pre;font-family:ui-monospace,Menlo,monospace;"
+    "<div style='display:flex;gap:12px;flex-wrap:wrap;margin-top:12px'>"
+    "  <div style='flex:1;min-width:320px'>"
+    "    <div>Consumed serial records:</div>"
+    "    <div id='consumedbox' style='margin-top:6px;white-space:pre;font-family:ui-monospace,Menlo,monospace;"
     "border:1px solid #ccc;padding:8px;max-height:280px;overflow:auto'></div>"
+    "  </div>"
+    "  <div style='flex:1;min-width:320px'>"
+    "    <div>log.txt:</div>"
+    "    <div id='logbox' style='margin-top:6px;white-space:pre;font-family:ui-monospace,Menlo,monospace;"
+    "border:1px solid #ccc;padding:8px;max-height:280px;overflow:auto'></div>"
+    "  </div>"
+    "</div>"
     "<script>\n"
     "async function refresh(){\n"
     "  const r=await fetch('/api/status');\n"
@@ -63,10 +73,13 @@ static const char k_index_html[] PROGMEM =
     "  document.getElementById('statusjson').textContent=t;\n"
     "  try{const j=JSON.parse(t);document.getElementById('sn').textContent=String(j.serial_next||0);}catch(e){}\n"
     "}\n"
-    "async function downloadLog(){\n"
-    "  const r=await fetch('/api/log');\n"
-    "  const t=await r.text();\n"
-    "  document.getElementById('logbox').textContent=t;\n"
+    "async function downloadLogs(){\n"
+    "  const r1=await fetch('/api/consumed');\n"
+    "  const t1=await r1.text();\n"
+    "  document.getElementById('consumedbox').textContent=t1;\n"
+    "  const r2=await fetch('/api/log');\n"
+    "  const t2=await r2.text();\n"
+    "  document.getElementById('logbox').textContent=t2;\n"
     "}\n"
     "refresh();setInterval(refresh,3000);\n"
     "</script></body></html>\n";
@@ -137,6 +150,32 @@ static void setup_routes() {
       const int c = f.read();
       if (c < 0) break;
       out += (char)c;
+    }
+    f.close();
+    g_server.send(200, "text/plain", out);
+  });
+
+  g_server.on("/api/consumed", HTTP_GET, []() {
+    File f = SPIFFS.open(serial_log::consumed_records_path(), "r");
+    if (!f) {
+      g_server.send(404, "text/plain", "Consumed serial record not found\n");
+      return;
+    }
+
+    // Convert uint32_t LE entries to text for display.
+    String out;
+    out.reserve((size_t)f.size() * 3u + 32u);
+    uint8_t b[4];
+    while (true) {
+      const int r = f.read(b, sizeof(b));
+      if (r == 0) break;
+      if (r != (int)sizeof(b)) {
+        out += "ERROR: corrupt consumed record (size not multiple of 4)\n";
+        break;
+      }
+      const uint32_t v = (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+      out += String((unsigned long)v);
+      out += "\n";
     }
     f.close();
     g_server.send(200, "text/plain", out);
