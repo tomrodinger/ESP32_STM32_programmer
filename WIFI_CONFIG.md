@@ -4,7 +4,7 @@
 
 - ESP32-S3 (Arduino/PlatformIO) acts as a standalone SWD programmer for STM32G031.
 - The target firmware binary is stored in ESP32 SPIFFS (partition label `fwfs`) and selected by scanning for exactly one `BL*` file via [`firmware_fs::find_single_firmware_bin()`](src/firmware_fs.cpp:62).
-- Production programming is a fail-fast sequence `i -> e -> w -> v -> R` triggered by Serial `<space>` or the GPIO46 jig button via [`run_production_sequence()`](src/main.cpp:134).
+- Production programming is a fail-fast sequence `i -> e -> w -> v -> R` triggered by Serial `<space>` or the GPIO45 jig button via [`run_production_sequence()`](src/main.cpp:134).
 
 ## Feature goal
 

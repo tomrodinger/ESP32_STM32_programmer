@@ -52,7 +52,7 @@ The project is built using **PlatformIO** with the **Arduino** framework.
 4.  **`src/main.cpp`**:
     -   Provides a Serial interface (115200 baud).
     -   Implements a small command console over Serial.
-    -   Includes a **production/jig trigger**: a physical button on **GPIO46** runs the production programming sequence.
+    -   Includes a **production/jig trigger**: a physical button on **GPIO45** runs the production programming sequence.
 
 ## Current status (as of this commit)
 
@@ -188,16 +188,16 @@ The production programming flow is implemented as a single **fail-fast** sequenc
 Triggers:
 
 1. Press **Spacebar** in the Serial terminal/monitor (command `<space>`).
-2. Press a physical **jig button** connected to **GPIO46**.
+2. Press a physical **jig button** connected to **GPIO45**.
 
 Note: ensure your serial terminal is configured to send keystrokes immediately (character mode). For automated testing,
 use [`tools/esp32_runner.py`](tools/esp32_runner.py:1) with `--space`.
 
-### GPIO46 jig button wiring
+### GPIO45 jig button wiring
 
-- Configure: **GPIO46 = `INPUT_PULLUP`** in firmware (internal pull-up enabled)
-- Wire: **GPIO46 ↔ button ↔ GND**
-- Behavior: button press pulls GPIO46 LOW, triggering the production programming sequence.
+- Configure: **GPIO45 = `INPUT_PULLUP`** in firmware (internal pull-up enabled)
+- Wire: **GPIO45 ↔ button ↔ GND**
+- Behavior: button press pulls GPIO45 LOW, triggering the production programming sequence.
 
 Implementation reference: button setup and debounce/edge-detect live in [`src/main.cpp`](src/main.cpp:1).
 

@@ -36,9 +36,9 @@ static void set_first_block_snapshot(const uint8_t *b0, uint32_t n) {
 static const swd_min::Pins PINS(35, 36, 37);
 
 // Production jig button:
-// - GPIO46 configured as INPUT_PULLUP
+// - GPIO45 configured as INPUT_PULLUP
 // - external button pulls to GND when pressed
-static constexpr int k_prod_button_pin = 46;
+static constexpr int k_prod_button_pin = 45;
 static constexpr uint32_t k_button_debounce_ms = 30;
 
 // Forward declarations (used by production sequence helper).
@@ -768,7 +768,7 @@ void loop() {
       // Falling edge (released->pressed): stable goes HIGH->LOW.
       if (!button_stable && button_armed) {
         button_armed = false;
-        run_production_sequence("GPIO46 button");
+        run_production_sequence("GPIO45 button");
       }
 
       // Re-arm after release.
