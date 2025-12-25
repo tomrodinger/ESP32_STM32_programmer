@@ -9,6 +9,12 @@
 #include "program_state.h"
 #include "serial_log.h"
 
+#include "ram_log.h"
+#include "tee_log.h"
+
+// Route all Serial prints in this file into the RAM terminal buffer as well.
+#define Serial tee_log::out()
+
 // Secrets: prefer local non-committed header.
 #if __has_include("wifi_secrets.h")
 #include "wifi_secrets.h"
@@ -23,6 +29,203 @@ namespace wifi_web_ui {
 
 static WebServer g_server(80);
 static bool g_started = false;
+
+static bool parse_http_range_bytes(const String &range, size_t total_len, size_t *out_start, size_t *out_len) {
+  if (out_start) *out_start = 0;
+  if (out_len) *out_len = total_len;
+  if (range.length() == 0) return false;
+
+  // Expected: "bytes=<start>-<end>" (end may be omitted).
+  if (!range.startsWith("bytes=")) return false;
+  const int dash = range.indexOf('-', 6);
+  if (dash < 0) return false;
+
+  const String a = range.substring(6, dash);
+  const String b = range.substring(dash + 1);
+
+  if (total_len == 0) return false;
+
+  // Support:
+  // - bytes=START-END
+  // - bytes=START-
+  // - bytes=-SUFFIX (last SUFFIX bytes)
+  if (a.length() == 0) {
+    // Suffix range
+    if (b.length() == 0) return false;
+    const size_t suffix = (size_t)b.toInt();
+    if (suffix == 0) return false;
+    const size_t start = (suffix >= total_len) ? 0 : (total_len - suffix);
+    const size_t len = total_len - start;
+    if (out_start) *out_start = start;
+    if (out_len) *out_len = len;
+    return true;
+  }
+
+  const size_t start = (size_t)a.toInt();
+  if (start >= total_len) return false;
+
+  size_t end_incl = total_len - 1;
+  if (b.length() > 0) {
+    end_incl = (size_t)b.toInt();
+    if (end_incl >= total_len) end_incl = total_len - 1;
+    if (end_incl < start) return false;
+  }
+
+  const size_t len = (end_incl - start) + 1;
+  if (out_start) *out_start = start;
+  if (out_len) *out_len = len;
+  return true;
+}
+
+static void send_ram_log_as_text(bool include_header) {
+  g_server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  g_server.send(200, "text/plain", "");
+
+  if (include_header) {
+    char hdr[176];
+    snprintf(hdr, sizeof(hdr), "# ram_log: size=%lu bytes, capacity=%lu bytes, total_written=%lu\n",
+             (unsigned long)ram_log::size(), (unsigned long)ram_log::capacity(),
+             (unsigned long)ram_log::total_written());
+    g_server.sendContent(hdr);
+  }
+
+  class SendContentPrint final : public Print {
+   public:
+    size_t write(uint8_t b) override {
+      const char c = (char)b;
+      g_server.sendContent(&c, 1);
+      return 1;
+    }
+    size_t write(const uint8_t *buffer, size_t size) override {
+      g_server.sendContent(reinterpret_cast<const char *>(buffer), size);
+      return size;
+    }
+  } sink;
+
+  ram_log::stream_to(sink);
+}
+
+static void send_ram_log_as_download_text(bool include_header) {
+  // NOTE: for best download-compatibility we do NOT include the textual header
+  // in the download response; it breaks range semantics and some download
+  // managers will retry/abort.
+  (void)include_header;
+
+  // IMPORTANT: to keep Content-Length consistent, disable RAM-log capture while
+  // serving the download.
+  tee_log::ScopedCaptureSuspend suspend;
+
+  const size_t total = ram_log::size();
+
+  // Some download managers issue HEAD and/or Range GETs.
+  size_t start = 0;
+  size_t len = total;
+  const String range = g_server.header("Range");
+  const bool has_range_hdr = (range.length() > 0);
+  const bool is_range = parse_http_range_bytes(range, total, &start, &len);
+
+  g_server.sendHeader("Cache-Control", "no-store");
+  g_server.sendHeader("Connection", "close");
+  g_server.sendHeader("Accept-Ranges", "bytes");
+  g_server.sendHeader("X-RamLog-Size", String((unsigned long)total));
+  g_server.sendHeader("X-RamLog-Capacity", String((unsigned long)ram_log::capacity()));
+  g_server.sendHeader("X-RamLog-TotalWritten", String((unsigned long)ram_log::total_written()));
+
+  if (has_range_hdr && !is_range) {
+    // Range requested but we can't satisfy it.
+    char cr[64];
+    snprintf(cr, sizeof(cr), "bytes */%lu", (unsigned long)total);
+    g_server.sendHeader("Content-Range", cr);
+    g_server.send(416, "text/plain", "Requested Range Not Satisfiable\n");
+    return;
+  }
+
+  if (is_range) {
+    const size_t end_incl = start + len - 1;
+    char cr[96];
+    snprintf(cr, sizeof(cr), "bytes %lu-%lu/%lu", (unsigned long)start, (unsigned long)end_incl, (unsigned long)total);
+    g_server.sendHeader("Content-Range", cr);
+    g_server.setContentLength(len);
+    g_server.send(206, "text/plain", "");
+  } else {
+    g_server.setContentLength(total);
+    g_server.send(200, "text/plain", "");
+  }
+
+  WiFiClient client = g_server.client();
+  client.setNoDelay(true);
+
+  const uint8_t *p1 = nullptr;
+  const uint8_t *p2 = nullptr;
+  size_t n1 = 0;
+  size_t n2 = 0;
+  ram_log::snapshot_spans(&p1, &n1, &p2, &n2);
+
+  // Skip `start` bytes into the spans.
+  size_t skip = start;
+  if (skip > 0 && n1 > 0) {
+    const size_t s = (skip < n1) ? skip : n1;
+    p1 += s;
+    n1 -= s;
+    skip -= s;
+  }
+  if (skip > 0 && n2 > 0) {
+    const size_t s = (skip < n2) ? skip : n2;
+    p2 += s;
+    n2 -= s;
+    skip -= s;
+  }
+
+  auto write_all = [&](const uint8_t *p, size_t n) -> bool {
+    if (!p || n == 0) return true;
+    size_t off = 0;
+    uint32_t zero_writes = 0;
+    while (off < n) {
+      const size_t want = ((n - off) > 2048u) ? 2048u : (n - off);
+      const size_t w = client.write(p + off, want);
+      if (w == 0) {
+        zero_writes++;
+        delay(2);
+        if (!client.connected() || zero_writes > 8) return false;
+        continue;
+      }
+      off += w;
+      zero_writes = 0;
+      delay(0);
+    }
+    return true;
+  };
+
+  size_t remain = len;
+  if (p1 && n1 > 0 && remain > 0) {
+    const size_t take1 = (n1 < remain) ? n1 : remain;
+    if (!write_all(p1, take1)) return;
+    remain -= take1;
+  }
+  if (p2 && n2 > 0 && remain > 0) {
+    const size_t take2 = (n2 < remain) ? n2 : remain;
+    if (!write_all(p2, take2)) return;
+    remain -= take2;
+  }
+
+  client.flush();
+}
+
+static void send_mem_json() {
+  // "Easy to attain" values without linker/map parsing. Intended for leak/
+  // fragmentation monitoring.
+  String json = "{";
+  json += "\"heap_size\":" + String((unsigned long)ESP.getHeapSize());
+  json += ",\"free_heap\":" + String((unsigned long)ESP.getFreeHeap());
+  json += ",\"min_free_heap\":" + String((unsigned long)ESP.getMinFreeHeap());
+  json += ",\"max_alloc_heap\":" + String((unsigned long)ESP.getMaxAllocHeap());
+#if defined(BOARD_HAS_PSRAM)
+  json += ",\"psram_size\":" + String((unsigned long)ESP.getPsramSize());
+  json += ",\"free_psram\":" + String((unsigned long)ESP.getFreePsram());
+#endif
+  json += "}";
+  g_server.send(200, "application/json", json);
+}
 
 static void stream_consumed_records_as_text(File &f, bool include_indices, bool annotate_marker, bool header_comment) {
   // Stream conversion from binary LE u32 to text, to avoid allocating large Strings.
@@ -77,6 +280,7 @@ static const char k_index_html[] PROGMEM =
     "<p>Firmware file (active): <code id='fw'>...</code></p>"
     "<p>Next serial: <code id='sn'>...</code></p>"
     "<p>Filesystem free: <code id='fsfree'>...</code> bytes (est. <code id='unitsleft'>...</code> units left)</p>"
+    "<p>Memory: <code id='memline'>...</code> <button onclick='refreshMem()'>Refresh</button></p>"
     "<p>Programming enabled: <code id='progok'>...</code></p>"
     "<hr/>"
     "<h3>Firmware management</h3>"
@@ -118,6 +322,12 @@ static const char k_index_html[] PROGMEM =
     "border:1px solid #ccc;padding:8px;max-height:280px;overflow:auto'></div>"
     "  </div>"
     "</div>"
+    "<div style='margin-top:12px'>"
+    "  <button onclick='viewRamLog()'>View RAM Terminal Buffer</button>"
+    "  <button onclick=\"window.location='/download/ram_log.txt'\">Download RAM Terminal Buffer</button>"
+    "</div>"
+    "<div id='ramlogbox' style='margin-top:6px;white-space:pre;font-family:ui-monospace,Menlo,monospace;'"
+    "background:#f7f7f7;border:1px solid #ddd;padding:8px;max-height:280px;overflow:auto'></div>"
     "<script>\n"
     "async function refresh(){\n"
     "  const r=await fetch('/api/status');\n"
@@ -187,7 +397,18 @@ static const char k_index_html[] PROGMEM =
     "  const t2=await r2.text();\n"
     "  document.getElementById('logbox').textContent=t2;\n"
     "}\n"
-    "refresh();setInterval(refresh,3000);\n"
+    "async function refreshMem(){\n"
+    "  const r=await fetch('/api/mem');\n"
+    "  const j=await r.json();\n"
+    "  const s='heap free '+j.free_heap+' / '+j.heap_size+' (min '+j.min_free_heap+', max_alloc '+j.max_alloc_heap+')';\n"
+    "  document.getElementById('memline').textContent=s;\n"
+    "}\n"
+    "async function viewRamLog(){\n"
+    "  const r=await fetch('/api/ram_log');\n"
+    "  const t=await r.text();\n"
+    "  document.getElementById('ramlogbox').textContent=t;\n"
+    "}\n"
+    "refresh();refreshMem();setInterval(refresh,3000);\n"
     "</script></body></html>\n";
 
 static void send_status_json() {
@@ -273,10 +494,16 @@ static void handle_post_serial() {
 }
 
 static void setup_routes() {
+  // Allow access to selected request headers (Arduino WebServer does not expose
+  // arbitrary headers unless explicitly collected).
+  static const char *k_header_keys[] = {"Range"};
+  g_server.collectHeaders(k_header_keys, 1);
+
   g_server.on("/", HTTP_GET, []() {
     g_server.send(200, "text/html", FPSTR(k_index_html));
   });
   g_server.on("/api/status", HTTP_GET, []() { send_status_json(); });
+  g_server.on("/api/mem", HTTP_GET, []() { send_mem_json(); });
   g_server.on("/api/serial", HTTP_POST, []() { handle_post_serial(); });
 
   g_server.on("/api/firmware/list", HTTP_GET, []() {
@@ -498,6 +725,9 @@ static void setup_routes() {
     f.close();
   });
 
+  // RAM terminal buffer view.
+  g_server.on("/api/ram_log", HTTP_GET, []() { send_ram_log_as_text(/*include_header=*/true); });
+
   // Download endpoints (full files).
   g_server.on("/download/log.txt", HTTP_GET, []() {
     File f = SPIFFS.open(serial_log::log_path(), "r");
@@ -519,6 +749,53 @@ static void setup_routes() {
     g_server.sendHeader("Content-Disposition", "attachment; filename=serial_consumed.bin");
     g_server.streamFile(f, "application/octet-stream");
     f.close();
+  });
+
+  // RAM terminal buffer download.
+  g_server.on("/download/ram_log.txt", HTTP_GET, []() {
+    g_server.sendHeader("Content-Disposition", "attachment; filename=ram_log.txt");
+    g_server.sendHeader("Content-Transfer-Encoding", "binary");
+    send_ram_log_as_download_text(/*include_header=*/false);
+  });
+
+  // Some clients issue HEAD before GET.
+  g_server.on("/download/ram_log.txt", HTTP_HEAD, []() {
+    tee_log::ScopedCaptureSuspend suspend;
+    const size_t total = ram_log::size();
+
+    size_t start = 0;
+    size_t len = total;
+    const String range = g_server.header("Range");
+    const bool has_range_hdr = (range.length() > 0);
+    const bool is_range = parse_http_range_bytes(range, total, &start, &len);
+
+    g_server.sendHeader("Content-Disposition", "attachment; filename=ram_log.txt");
+    g_server.sendHeader("Content-Transfer-Encoding", "binary");
+    g_server.sendHeader("Cache-Control", "no-store");
+    g_server.sendHeader("Pragma", "no-cache");
+    g_server.sendHeader("Connection", "close");
+    g_server.sendHeader("Accept-Ranges", "bytes");
+
+    if (has_range_hdr && !is_range) {
+      char cr[64];
+      snprintf(cr, sizeof(cr), "bytes */%lu", (unsigned long)total);
+      g_server.sendHeader("Content-Range", cr);
+      g_server.send(416, "application/octet-stream", "");
+      return;
+    }
+
+    if (is_range) {
+      const size_t end_incl = start + len - 1;
+      char cr[96];
+      snprintf(cr, sizeof(cr), "bytes %lu-%lu/%lu", (unsigned long)start, (unsigned long)end_incl, (unsigned long)total);
+      g_server.sendHeader("Content-Range", cr);
+      g_server.setContentLength(len);
+      g_server.send(206, "application/octet-stream", "");
+      return;
+    }
+
+    g_server.setContentLength(total);
+    g_server.send(200, "application/octet-stream", "");
   });
   g_server.onNotFound([]() { g_server.send(404, "text/plain", "Not found\n"); });
 }
@@ -556,3 +833,5 @@ void start_task() {
 }
 
 }  // namespace wifi_web_ui
+
+#undef Serial

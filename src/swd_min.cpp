@@ -4,6 +4,11 @@
 #include "driver/gpio.h"
 #endif
 
+#include "tee_log.h"
+
+// Route all Serial prints in this file into the RAM terminal buffer as well.
+#define Serial tee_log::out()
+
 namespace swd_min {
 
 static Pins g_pins;
@@ -1104,3 +1109,5 @@ const char *ack_to_str(uint8_t ack) {
 }
 
 } // namespace swd_min
+
+#undef Serial

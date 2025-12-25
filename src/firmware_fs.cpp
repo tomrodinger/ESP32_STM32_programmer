@@ -7,6 +7,11 @@
 
 #include <ctype.h>
 
+#include "tee_log.h"
+
+// Route all Serial prints in this file into the RAM terminal buffer as well.
+#define Serial tee_log::out()
+
 namespace firmware_fs {
 
 // Note: SPIFFS is mounted at base path "/spiffs", but Arduino's FS APIs
@@ -234,3 +239,5 @@ bool reconcile_active_selection(String *out_active_path) {
 }
 
 }  // namespace firmware_fs
+
+#undef Serial

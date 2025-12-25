@@ -273,7 +273,24 @@ To change the firmware being flashed to the STM32:
 1. Use ESPConnect to upload exactly one file that matches `BL*` into the ESP32 SPIFFS partition.
 2. Ensure there is **exactly one** matching file on the device (multiple matches are treated as an error).
 3. Reboot the ESP32 (or use the `F` command to confirm which firmware file is selected).
-4. Run `w` to program and `v` to verify.
+  4. Run `w` to program and `v` to verify.
+
+## RAM terminal buffer + memory stats
+
+The firmware keeps a **volatile circular RAM buffer** of recent Serial output (byte-based, overwrites oldest when full).
+
+### Serial commands
+
+- `t`: dump the RAM terminal buffer to the USB serial console (prints size/capacity first)
+- `m`: print memory stats (heap + optional PSRAM)
+
+### Web UI
+
+The WiFi web UI adds:
+
+- **View RAM Terminal Buffer**: shows the RAM buffer contents in a scrollable window
+- **Download RAM Terminal Buffer**: downloads the buffer as `ram_log.txt`
+- **Memory** line + **Refresh** button: shows heap stats (and PSRAM when available)
 
 ### PlatformIO alternative (for CI/dev convenience)
 

@@ -4,6 +4,11 @@
 
 #include "swd_min.h"
 
+#include "tee_log.h"
+
+// Route all Serial prints in this file into the RAM terminal buffer as well.
+#define Serial tee_log::out()
+
 namespace stm32g0_prog {
 
 static inline bool verbose() { return swd_min::verbose_enabled(); }
@@ -1140,3 +1145,5 @@ bool prepare_target_for_normal_run() {
 }
 
 } // namespace stm32g0_prog
+
+#undef Serial
