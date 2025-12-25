@@ -1,5 +1,7 @@
 #include <Arduino.h>
 
+#include <WiFi.h>
+
 #include "firmware_fs.h"
 #include "firmware_source.h"
 #include "firmware_source_file.h"
@@ -53,7 +55,8 @@ static bool cmd_verify_with_product_info(uint32_t serial, uint64_t unique_id);
 static void print_hex_dump_16(uint32_t base_addr, const uint8_t *data, uint32_t len);
 static void print_product_info_struct(const product_info_struct &pi);
 static bool cmd_consume_serial_record_only();
-static bool cmd_print_log();
+static bool cmd_print_logs();
+static void cmd_print_wifi_ap_status();
 
 static void print_user_pressed_banner(char c) {
   if (c == ' ') {
@@ -76,7 +79,7 @@ static void print_help() {
   Serial.println("  i = reset + read DP IDCODE");
   Serial.println("  s = consume a serial and append it to consumed-serial record (test only)");
   Serial.println("  S<serial> = set next serial (append USERSET_<serial>) (example: S1000)");
-  Serial.println("  l = print /log.txt to Serial");
+  Serial.println("  l = print logs to Serial (/log.txt + consumed serial record; prints last 50 records each)");
   Serial.println("  R = let firmware run: clear debug-halt state, pulse NRST, then release SWD pins");
   Serial.println("  t = SWD smoke test (DP power-up handshake + AHB-AP IDR)");
   Serial.println("  d = toggle SWD verbose diagnostics");
@@ -88,11 +91,11 @@ static void print_help() {
   Serial.println("  w = write firmware to flash (prints serial+unique_id, first block hexdump, product_info_struct)");
   Serial.println("      (prints a simple benchmark: connect/program/total time)");
   Serial.println("  v = verify firmware in flash (FAST; prints benchmark + mismatch count)");
-  Serial.println("  a = all: connect+halt, erase, write, verify");
+  Serial.println("  a = access point (WiFi) status: up/down + IP address");
   Serial.println("  <space> = PRODUCTION: run i -> e -> w -> v -> R (fail-fast; stops at first error)");
   Serial.println("Production jig:");
   Serial.printf("  Button on GPIO%d (INPUT_PULLUP) pulls to GND when pressed -> runs <space> sequence\n",
-                k_prod_button_pin);
+                 k_prod_button_pin);
 }
 
 static bool ensure_fs_mounted() {
@@ -651,13 +654,6 @@ static bool cmd_ap_csw_write_readback_test() {
   return ok;
 }
 
-static bool cmd_all() {
-  if (!cmd_connect()) return false;
-  if (!stm32g0_prog::flash_mass_erase()) return false;
-  if (!cmd_write()) return false;
-  return cmd_verify();
-}
-
 void setup() {
   Serial.begin(115200);
   while (!Serial) {
@@ -722,23 +718,127 @@ static bool cmd_consume_serial_record_only() {
   return true;
 }
 
-static bool cmd_print_log() {
+static bool print_text_file_tail_lines(const char *path, uint32_t max_lines) {
+  if (!path) return false;
   if (!ensure_fs_mounted()) return false;
-  File f = SPIFFS.open(serial_log::log_path(), "r");
+
+  File f = SPIFFS.open(path, "r");
   if (!f) {
-    Serial.println("Log open FAIL (missing?)");
+    Serial.printf("%s open FAIL (missing?)\n", path);
     return false;
   }
-  Serial.printf("--- %s ---\n", serial_log::log_path());
+
+  // Keep last N lines in a ring buffer so we can print an omission header.
+  String ring[50];
+  const uint32_t cap = (max_lines > 50u) ? 50u : max_lines;
+  uint32_t total = 0;
+  uint32_t stored = 0;
+
   while (f.available()) {
-    const int c = f.read();
-    if (c < 0) break;
-    Serial.write((uint8_t)c);
+    String line = f.readStringUntil('\n');
+    line.replace("\r", "");
+    ring[total % cap] = line;
+    total++;
+    if (stored < cap) stored++;
   }
-  Serial.println();
-  Serial.println("--- END LOG ---");
+  f.close();
+
+  Serial.printf("--- %s ---\n", path);
+  if (total > cap) {
+    const uint32_t omitted = total - cap;
+    Serial.printf("Log file too long. omitting preceding %lu records.\n", (unsigned long)omitted);
+  }
+
+  const uint32_t start = (total > cap) ? (total - cap) : 0u;
+  for (uint32_t i = start; i < total; i++) {
+    Serial.println(ring[i % cap]);
+  }
+  Serial.printf("--- END %s ---\n", path);
+  return true;
+}
+
+static bool print_consumed_records_tail(const char *path, uint32_t max_records) {
+  if (!path) return false;
+  if (!ensure_fs_mounted()) return false;
+
+  File f = SPIFFS.open(path, "r");
+  if (!f) {
+    Serial.printf("%s open FAIL (missing?)\n", path);
+    return false;
+  }
+
+  const size_t sz = (size_t)f.size();
+  if ((sz % 4u) != 0u) {
+    Serial.printf("--- %s ---\n", path);
+    Serial.println("ERROR: corrupt consumed record (size not multiple of 4)");
+    Serial.printf("--- END %s ---\n", path);
+    f.close();
+    return false;
+  }
+
+  const uint32_t total = (uint32_t)(sz / 4u);
+  const uint32_t cap = (max_records > 50u) ? 50u : max_records;
+  const uint32_t to_print = (total > cap) ? cap : total;
+  const uint32_t start_idx = total - to_print;
+
+  Serial.printf("--- %s ---\n", path);
+  if (total > cap) {
+    const uint32_t omitted = total - cap;
+    Serial.printf("Log file too long. omitting preceding %lu records.\n", (unsigned long)omitted);
+  }
+
+  if (!f.seek(start_idx * 4u, SeekSet)) {
+    Serial.println("ERROR: seek failed");
+    Serial.printf("--- END %s ---\n", path);
+    f.close();
+    return false;
+  }
+
+  uint8_t b[4];
+  for (uint32_t i = 0; i < to_print; i++) {
+    const int r = f.read(b, sizeof(b));
+    if (r != (int)sizeof(b)) {
+      Serial.println("ERROR: short read");
+      break;
+    }
+    const uint32_t v = (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+    const uint32_t idx = start_idx + i;
+    if (v == 0x00000000u) {
+      Serial.printf("[%lu] 0 (USERSET marker; next entry is next-serial seed)\n", (unsigned long)idx);
+    } else {
+      Serial.printf("[%lu] %lu\n", (unsigned long)idx, (unsigned long)v);
+    }
+  }
+
+  Serial.printf("--- END %s ---\n", path);
   f.close();
   return true;
+}
+
+static bool cmd_print_logs() {
+  bool ok = true;
+  ok = print_text_file_tail_lines(serial_log::log_path(), /*max_lines=*/50) && ok;
+  ok = print_consumed_records_tail(serial_log::consumed_records_path(), /*max_records=*/50) && ok;
+  return ok;
+}
+
+static void cmd_print_wifi_ap_status() {
+  const wifi_mode_t mode = WiFi.getMode();
+  const bool ap_enabled = (mode == WIFI_MODE_AP) || (mode == WIFI_MODE_APSTA);
+
+  Serial.printf("WiFi mode: %d (%s)\n", (int)mode,
+                (mode == WIFI_MODE_NULL)   ? "OFF"
+                : (mode == WIFI_MODE_STA)  ? "STA"
+                : (mode == WIFI_MODE_AP)   ? "AP"
+                : (mode == WIFI_MODE_APSTA) ? "AP+STA"
+                                             : "UNKNOWN");
+  Serial.printf("WiFi AP enabled: %s\n", ap_enabled ? "YES" : "NO");
+
+  if (ap_enabled) {
+    const IPAddress ip = WiFi.softAPIP();
+    Serial.printf("WiFi AP IP: %s\n", ip.toString().c_str());
+    Serial.printf("WiFi AP stations: %d\n", WiFi.softAPgetStationNum());
+  }
 }
 
 void loop() {
@@ -868,7 +968,7 @@ void loop() {
       break;
 
     case 'l':
-      cmd_print_log();
+      cmd_print_logs();
       break;
 
     case 'R':
@@ -916,11 +1016,7 @@ void loop() {
       break;
 
     case 'a':
-      Serial.println("Running full programming sequence...");
-      {
-        const bool ok = cmd_all();
-        Serial.println(ok ? "SUCCESS" : "FAILED");
-      }
+      cmd_print_wifi_ap_status();
       break;
 
     default:

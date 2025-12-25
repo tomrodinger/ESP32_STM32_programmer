@@ -222,12 +222,6 @@ run_step_expect \
   fi
   success_box "cmd_w_serial_increment" "serial incremented by 1 (s1=$s1 -> s2=$s2)"
 }
-
-run_step_expect \
-  "cmd_l" \
-  "Print the full serial log to Serial" \
-  "--- /log.txt ---" \
-  "$PY" "$ROOT_DIR/tools/esp32_runner.py" --skip-build --skip-upload -l
 run_step_expect \
   "cmd_e" \
   "Erase target flash and confirm completion" \
@@ -250,3 +244,42 @@ run_step_expect \
   "Run full production sequence and confirm it reports success" \
   "PRODUCTION sequence SUCCESS" \
   "$PY" "$ROOT_DIR/tools/esp32_runner.py" --skip-build --skip-upload --space --max 240 --quiet 1.0
+
+# 6) WiFi/AP status should include an IP address.
+run_step_expect \
+  "cmd_a" \
+  "Print WiFi/AP status to Serial (must include IP address)" \
+  "WiFi AP IP:" \
+  "$PY" "$ROOT_DIR/tools/esp32_runner.py" --skip-build --skip-upload -a
+{
+  loga="$TMP_LOG_DIR/cmd_a.log"
+  ip_line="$(grep -Eom1 'WiFi AP IP: ([0-9]{1,3}\.){3}[0-9]{1,3}' "$loga" || true)"
+  if [[ -z "$ip_line" ]]; then
+    fail "cmd_a_ip (missing IPv4 address after 'WiFi AP IP:')" "$loga"
+  fi
+  success_box "cmd_a_ip" "found IP line: $ip_line"
+}
+
+# 7) 'l' should be the last test so it contains meaningful data.
+run_step_expect \
+  "cmd_l" \
+  "Print both logs to Serial (tail)" \
+  "--- /log.txt ---" \
+  "$PY" "$ROOT_DIR/tools/esp32_runner.py" --skip-build --skip-upload -l
+
+# Verify cmd_l output includes required reference lines.
+{
+  logl="$TMP_LOG_DIR/cmd_l.log"
+  ref="$ROOT_DIR/testdata/expected_cmd_l_contains.txt"
+  if [[ ! -f "$ref" ]]; then
+    fail "cmd_l_reference_missing ($ref)" "$logl"
+  fi
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    [[ "$line" =~ ^# ]] && continue
+    if ! grep -Fq -- "$line" "$logl"; then
+      fail "cmd_l_reference_mismatch (missing expected line: $line)" "$logl"
+    fi
+  done < "$ref"
+  success_box "cmd_l_reference" "cmd_l output contained all required reference lines from $ref"
+}

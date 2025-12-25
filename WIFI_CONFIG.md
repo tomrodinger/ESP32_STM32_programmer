@@ -51,10 +51,19 @@ On boot, the firmware scans the last two `uint32_t` entries from the consumed-re
 
 ### Web UI log download
 
-When pressing "Download Logs" in the Web UI, two scrollable windows are shown:
+The Web UI provides two actions:
 
-1) **Consumed serial records**: the binary file decoded to one decimal serial per line.
+1) **View Logs**: shows both logs directly in the browser.
+2) **Download Logs**: downloads each log to your computer (separately, because they are different files):
+   - `log.txt` (text)
+   - `serial_consumed.bin` (binary)
+
+When pressing "View Logs" in the Web UI, two scrollable windows are shown:
+
+1) **Consumed serial records**: the binary file decoded to text for display.
 2) **log.txt**: the plain text production summary log.
+
+Note: the Web UI shows the **full** logs (no 50-record truncation). The 50-record truncation/omission message is for the Serial-console `l` command.
 - Product-info injection is implemented in [`firmware_source::ProductInfoInjectorReader`](src/product_info_injector_reader.h:1):
   - Reads the first 256-byte block, patches `serial_number` + `unique_id` inside the `product_info_struct`, then serves patched bytes.
   - All remaining bytes are pass-through from SPIFFS.
@@ -76,9 +85,13 @@ When pressing "Download Logs" in the Web UI, two scrollable windows are shown:
   - Policy: if last valid line is `USERSET_<N>`, then `serial_next=N`.
   - Otherwise `serial_next=last_serial+1`.
   - Runs automatically at boot via [`cmd_sync_serial_from_log()`](src/main.cpp:654).
-- `l`: print the full `/log.txt` to Serial.
+- `l`: print both logs to Serial (each capped to the last 50 records; prints an omission banner if longer).
 - `w`: prints the reserved `serial` + generated `unique_id`, dumps the first 256 bytes (post-injection) in hex, and prints the decoded `product_info_struct`.
 - `S<serial>`: append `USERSET_<serial>` and immediately re-sync/print the derived `serial_next`.
+
+## WiFi AP debugging command
+
+- `a` (access point): print WiFi/AP status to Serial (up/down, IP address).
 
 ## Web UI additions
 

@@ -132,7 +132,9 @@ def _send_cmd_and_capture(ser: "serial.Serial", cmd_char: str, quiet_s: float, m
     elif lead == "s":
         stop_markers = ["Consume serial OK:", "Consume serial FAIL"]
     elif lead == "l":
-        stop_markers = ["--- /log.txt ---", "Log open FAIL"]
+        stop_markers = ["--- /serial_consumed.bin ---", "--- /log.txt ---", "Log open FAIL"]
+    elif lead == "a":
+        stop_markers = ["WiFi mode:", "WiFi AP IP:", "WiFi AP enabled:"]
     elif lead == "S":
         stop_markers = ["Set serial OK:", "Set serial FAIL", "Set serial:"]
     elif lead == " ":

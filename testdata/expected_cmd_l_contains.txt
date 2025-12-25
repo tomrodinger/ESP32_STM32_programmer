@@ -1,0 +1,16 @@
+# Lines that MUST appear in the captured output of the serial 'l' command.
+#
+# Updating this reference requires explicit human approval.
+
+--- /log.txt ---
+USERSET_1000
+iewvR_1003_OK
+--- END /log.txt ---
+--- /serial_consumed.bin ---
+0 (USERSET marker; next entry is next-serial seed)
+1000
+1000
+1001
+1002
+1003
+--- END /serial_consumed.bin ---

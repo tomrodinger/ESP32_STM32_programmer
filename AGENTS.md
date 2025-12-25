@@ -6,7 +6,12 @@ Refer to `README.md` for project details and architecture.
 
 1.  **Verify Before Completion**: You MUST compile and run/test the code before declaring the task complete. Do not assume code works just because it looks correct. Use `pio run` to verify compilation.
 2.  **Mandatory automated tests**: When you change code or add a feature, you MUST run the automated test suite before declaring completion. For this repo that means running `./test.sh` (in addition to `pio run` where relevant). Treat any non-zero exit code, errors, or warnings as a failure that must be fixed.
-3.  **Mandatory human test plan + confirmation**: If any part of the change affects hardware behavior or the web UI, you MUST provide a short, step-by-step manual test plan for a human to execute, and you MUST explicitly ask the human to verify the results before you declare completion.
+3.  **HARD STOP: Manual test plan + explicit human confirmation required for HW/UI changes**
+    - If you change **hardware behavior** or the **web UI** (including any HTML, routes, buttons, endpoints, or anything under [`src/wifi_web_ui.cpp`](src/wifi_web_ui.cpp:1)), you MUST:
+      1) Provide a short, numbered **manual test plan** (steps a human can execute).
+      2) Explicitly ask the human to **run the plan and confirm results**.
+      3) Do **NOT** use `attempt_completion` until the human confirms.
+    - Memory rule: **"Changed HW/UI? -> PLAN + ASK + WAIT."**
 4.  **Concise Completion**: When finishing a task, do NOT provide a long summary of what you did. No human reads that. Simply state: "I'm done and I have fully tested the code."
 5. **Human must verify the output**: You MUST NOT assume the output is correct. You MUST ask the human to check it too
 6. **Documentation must be up to date**: You MUST update the documentation to reflect the changes you made.

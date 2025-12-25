@@ -24,6 +24,48 @@ namespace wifi_web_ui {
 static WebServer g_server(80);
 static bool g_started = false;
 
+static void stream_consumed_records_as_text(File &f, bool include_indices, bool annotate_marker, bool header_comment) {
+  // Stream conversion from binary LE u32 to text, to avoid allocating large Strings.
+  // Uses chunked transfer (CONTENT_LENGTH_UNKNOWN).
+
+  const size_t sz = (size_t)f.size();
+  if ((sz % 4u) != 0u) {
+    g_server.sendContent("ERROR: corrupt consumed record (size not multiple of 4)\n");
+    return;
+  }
+
+  if (header_comment) {
+    g_server.sendContent("# serial_consumed.bin decoded as little-endian uint32 entries\n");
+    if (annotate_marker) {
+      g_server.sendContent("# NOTE: value 0 indicates USERSET marker; next entry is the user-set next-serial seed\n");
+    }
+  }
+
+  const uint32_t total = (uint32_t)(sz / 4u);
+  uint8_t b[4];
+  for (uint32_t idx = 0; idx < total; idx++) {
+    const int r = f.read(b, sizeof(b));
+    if (r != (int)sizeof(b)) {
+      g_server.sendContent("ERROR: short read\n");
+      return;
+    }
+    const uint32_t v = (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+
+    char line[128];
+    if (include_indices) {
+      if (annotate_marker && v == 0x00000000u) {
+        snprintf(line, sizeof(line), "[%lu] 0 (USERSET marker; next entry is next-serial seed)\n", (unsigned long)idx);
+      } else {
+        snprintf(line, sizeof(line), "[%lu] %lu\n", (unsigned long)idx, (unsigned long)v);
+      }
+    } else {
+      // Plain list: one number per line.
+      snprintf(line, sizeof(line), "%lu\n", (unsigned long)v);
+    }
+    g_server.sendContent(line);
+  }
+}
+
 static const char k_index_html[] PROGMEM =
     "<!doctype html>\n"
     "<html><head><meta charset='utf-8'/>"
@@ -44,7 +86,9 @@ static const char k_index_html[] PROGMEM =
     "background:#f7f7f7;border:1px solid #ddd;padding:8px'></pre>"
     "</div>"
     "<div style='margin-top:12px'>"
-    "  <button onclick='downloadLogs()'>Download Logs</button>"
+    "  <button onclick='viewLogs()'>View Logs</button>"
+    "  <button onclick=\"window.location='/download/log.txt'\">Download log.txt</button>"
+    "  <button onclick=\"window.location='/download/serial_consumed.bin'\">Download consumed serials</button>"
     "</div>"
     "<div style='display:flex;gap:12px;flex-wrap:wrap;margin-top:12px'>"
     "  <div style='flex:1;min-width:320px'>"
@@ -73,7 +117,7 @@ static const char k_index_html[] PROGMEM =
     "  document.getElementById('statusjson').textContent=t;\n"
     "  try{const j=JSON.parse(t);document.getElementById('sn').textContent=String(j.serial_next||0);}catch(e){}\n"
     "}\n"
-    "async function downloadLogs(){\n"
+    "async function viewLogs(){\n"
     "  const r1=await fetch('/api/consumed');\n"
     "  const t1=await r1.text();\n"
     "  document.getElementById('consumedbox').textContent=t1;\n"
@@ -138,47 +182,90 @@ static void setup_routes() {
   });
   g_server.on("/api/status", HTTP_GET, []() { send_status_json(); });
   g_server.on("/api/serial", HTTP_POST, []() { handle_post_serial(); });
+  g_server.on("/api/logs", HTTP_GET, []() {
+    // Simple combined view for in-browser viewing (full content).
+    g_server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    g_server.send(200, "text/plain", "");
+
+    g_server.sendContent("===== log.txt =====\n");
+    {
+      File f = SPIFFS.open(serial_log::log_path(), "r");
+      if (!f) {
+        g_server.sendContent("(missing)\n");
+      } else {
+        uint8_t buf[512];
+        while (true) {
+          const int r = f.read(buf, sizeof(buf));
+          if (r <= 0) break;
+          g_server.sendContent(reinterpret_cast<const char *>(buf), (size_t)r);
+        }
+        f.close();
+      }
+    }
+
+    g_server.sendContent("\n\n===== serial_consumed (decoded) =====\n");
+    {
+      File f = SPIFFS.open(serial_log::consumed_records_path(), "r");
+      if (!f) {
+        g_server.sendContent("(missing)\n");
+      } else {
+        stream_consumed_records_as_text(f, /*include_indices=*/true, /*annotate_marker=*/true, /*header_comment=*/false);
+        f.close();
+      }
+    }
+  });
   g_server.on("/api/log", HTTP_GET, []() {
+    if (!SPIFFS.exists(serial_log::log_path())) {
+      g_server.send(404, "text/plain", "Log not found\n");
+      return;
+    }
     File f = SPIFFS.open(serial_log::log_path(), "r");
     if (!f) {
       g_server.send(404, "text/plain", "Log not found\n");
       return;
     }
-    String out;
-    out.reserve((size_t)f.size() + 16);
-    while (f.available()) {
-      const int c = f.read();
-      if (c < 0) break;
-      out += (char)c;
-    }
+    g_server.streamFile(f, "text/plain");
     f.close();
-    g_server.send(200, "text/plain", out);
   });
 
   g_server.on("/api/consumed", HTTP_GET, []() {
+    if (!SPIFFS.exists(serial_log::consumed_records_path())) {
+      g_server.send(404, "text/plain", "Consumed serial record not found\n");
+      return;
+    }
     File f = SPIFFS.open(serial_log::consumed_records_path(), "r");
     if (!f) {
       g_server.send(404, "text/plain", "Consumed serial record not found\n");
       return;
     }
 
-    // Convert uint32_t LE entries to text for display.
-    String out;
-    out.reserve((size_t)f.size() * 3u + 32u);
-    uint8_t b[4];
-    while (true) {
-      const int r = f.read(b, sizeof(b));
-      if (r == 0) break;
-      if (r != (int)sizeof(b)) {
-        out += "ERROR: corrupt consumed record (size not multiple of 4)\n";
-        break;
-      }
-      const uint32_t v = (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
-      out += String((unsigned long)v);
-      out += "\n";
-    }
+    g_server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    g_server.send(200, "text/plain", "");
+    stream_consumed_records_as_text(f, /*include_indices=*/true, /*annotate_marker=*/true, /*header_comment=*/false);
     f.close();
-    g_server.send(200, "text/plain", out);
+  });
+
+  // Download endpoints (full files).
+  g_server.on("/download/log.txt", HTTP_GET, []() {
+    File f = SPIFFS.open(serial_log::log_path(), "r");
+    if (!f) {
+      g_server.send(404, "text/plain", "Log not found\n");
+      return;
+    }
+    g_server.sendHeader("Content-Disposition", "attachment; filename=log.txt");
+    g_server.streamFile(f, "text/plain");
+    f.close();
+  });
+
+  g_server.on("/download/serial_consumed.bin", HTTP_GET, []() {
+    File f = SPIFFS.open(serial_log::consumed_records_path(), "r");
+    if (!f) {
+      g_server.send(404, "text/plain", "Consumed serial record not found\n");
+      return;
+    }
+    g_server.sendHeader("Content-Disposition", "attachment; filename=serial_consumed.bin");
+    g_server.streamFile(f, "application/octet-stream");
+    f.close();
   });
   g_server.onNotFound([]() { g_server.send(404, "text/plain", "Not found\n"); });
 }
