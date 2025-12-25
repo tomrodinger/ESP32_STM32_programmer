@@ -666,7 +666,17 @@ static bool cmd_ap_csw_write_readback_test() {
 
 void setup() {
   Serial.begin(115200);
-  while (!Serial) {
+  // IMPORTANT: do NOT block forever waiting for a USB serial monitor.
+  //
+  // On ESP32-S3 with native USB CDC, `while (!Serial)` can block indefinitely
+  // when powered from a wall adapter (no host connected). That prevents:
+  // - WiFi AP from starting
+  // - the production button loop from running
+  //
+  // Allow a short grace period for developers (so early boot logs still show up
+  // when a monitor is opened quickly), then continue headless.
+  const uint32_t serial_wait_start_ms = millis();
+  while (!Serial && (uint32_t)(millis() - serial_wait_start_ms) < 1500u) {
     delay(10);
   }
 

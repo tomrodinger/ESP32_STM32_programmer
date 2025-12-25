@@ -31,6 +31,8 @@ The project is built using **PlatformIO** with the **Arduino** framework.
 
 **Note on USB CDC**: The project is configured to use the ESP32-S3's native USB port for Serial communication (`USB_CDC_ON_BOOT=1`). This allows you to see the serial output directly via the USB connector used for programming.
 
+**Headless boot note**: on ESP32-S3 native USB CDC, blocking forever on `while (!Serial)` can prevent startup when powered from a wall adapter (no USB host). The firmware therefore waits only briefly for Serial at boot and then continues so WiFi + the jig button work without a computer.
+
 ### Key Components
 
 1.  **`src/swd_min.cpp` / `src/swd_min.h`**:
