@@ -136,7 +136,7 @@ static void send_ram_log_as_download_text(bool include_header) {
     char cr[64];
     snprintf(cr, sizeof(cr), "bytes */%lu", (unsigned long)total);
     g_server.sendHeader("Content-Range", cr);
-    g_server.send(416, "text/plain", "Requested Range Not Satisfiable\n");
+    g_server.send(416, "application/octet-stream", "");
     return;
   }
 
@@ -146,10 +146,10 @@ static void send_ram_log_as_download_text(bool include_header) {
     snprintf(cr, sizeof(cr), "bytes %lu-%lu/%lu", (unsigned long)start, (unsigned long)end_incl, (unsigned long)total);
     g_server.sendHeader("Content-Range", cr);
     g_server.setContentLength(len);
-    g_server.send(206, "text/plain", "");
+    g_server.send(206, "application/octet-stream", "");
   } else {
     g_server.setContentLength(total);
-    g_server.send(200, "text/plain", "");
+    g_server.send(200, "application/octet-stream", "");
   }
 
   WiFiClient client = g_server.client();
@@ -176,12 +176,13 @@ static void send_ram_log_as_download_text(bool include_header) {
     skip -= s;
   }
 
+  // Use MTU-friendly chunk size (1460 is typical for Ethernet/WiFi minus headers).
   auto write_all = [&](const uint8_t *p, size_t n) -> bool {
     if (!p || n == 0) return true;
     size_t off = 0;
     uint32_t zero_writes = 0;
     while (off < n) {
-      const size_t want = ((n - off) > 2048u) ? 2048u : (n - off);
+      const size_t want = ((n - off) > 1460u) ? 1460u : (n - off);
       const size_t w = client.write(p + off, want);
       if (w == 0) {
         zero_writes++;
@@ -191,7 +192,8 @@ static void send_ram_log_as_download_text(bool include_header) {
       }
       off += w;
       zero_writes = 0;
-      delay(0);
+      client.flush();  // Flush after each chunk for download manager compatibility.
+      delay(1);        // Yield to WiFi/LwIP stack.
     }
     return true;
   };
@@ -199,16 +201,23 @@ static void send_ram_log_as_download_text(bool include_header) {
   size_t remain = len;
   if (p1 && n1 > 0 && remain > 0) {
     const size_t take1 = (n1 < remain) ? n1 : remain;
-    if (!write_all(p1, take1)) return;
+    if (!write_all(p1, take1)) {
+      client.stop();
+      return;
+    }
     remain -= take1;
   }
   if (p2 && n2 > 0 && remain > 0) {
     const size_t take2 = (n2 < remain) ? n2 : remain;
-    if (!write_all(p2, take2)) return;
+    if (!write_all(p2, take2)) {
+      client.stop();
+      return;
+    }
     remain -= take2;
   }
 
   client.flush();
+  client.stop();  // Actively close the connection for download manager compatibility.
 }
 
 static void send_mem_json() {
