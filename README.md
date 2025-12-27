@@ -120,6 +120,24 @@ In this edge-only model, the only legal SWDIO transitions are:
 
 ## Usage
 
+### Modes (serial console)
+
+The firmware has two interactive serial modes with separate command sets:
+
+- **Mode 1 (default): SWD Programming Mode**
+- **Mode 2: RS485 Testing Mode** (currently a placeholder)
+
+Mode switching works from either mode:
+
+- Press `1` to stay/switch to Mode 1
+- Press `2` to stay/switch to Mode 2
+
+Mode 2 commands (for now):
+
+- `h` / `?` = help
+- `1` / `2` = mode switching
+- `t` = prints `Testing... test done!`
+
 ### Test runner output
 
 [`test.sh`](test.sh:1) streams each command's output to the console (and also saves it under [`.test_logs/`](.test_logs/:1)).
@@ -160,7 +178,7 @@ python3 build_and_upload.py -- --space --max 120 --quiet 1.0
     3.  **Run**:
        -   Open the Serial Monitor: `pio device monitor` (baud rate 115200).
        -   Reset the ESP32-S3.
-        -   Use serial commands:
+        -   Use serial commands (Mode 1 unless you switch to Mode 2):
             - `h` help
             - `f` filesystem status (LittleFS) + list files
             - `F` select firmware file (must match `bootloader*.bin` and be unique)
@@ -170,7 +188,6 @@ python3 build_and_upload.py -- --space --max 120 --quiet 1.0
             - `l` print `/log.txt` to Serial
             - `R` let firmware run: clear debug-halt state, pulse NRST, then release SWD pins
             - `d` toggle SWD verbose diagnostics (prints DP/AP/memory access details)
-            - `t` SWD smoke test (DP power-up handshake + AHB-AP IDR)
             - `c` DP CTRL/STAT single-write test (DP[0x04]=0x50000000)
             - `b` DP ABORT write test (ABORT=0x1E under NRST low then high)
             - `p` read Program Counter (PC)
@@ -178,7 +195,7 @@ python3 build_and_upload.py -- --space --max 120 --quiet 1.0
             - `e` mass erase (connect-under-reset recovery method)
             - `w` write embedded firmware (prints serial + unique_id + injected first-block dump + timing benchmark)
             - `v` verify embedded firmware (FAST; prints a timing benchmark)
-            - `a` all (connect+halt, erase, write, verify)
+            - `a` access point (WiFi) status
             - `<space>` **PRODUCTION**: run `i -> e -> w -> v -> R` (fail-fast; aborts on first error)
 
 ## Production / jig mode

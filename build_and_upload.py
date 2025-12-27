@@ -2,11 +2,11 @@
 
 """Build + upload fwfs (SPIFFS) image and build + upload ESP32 firmware.
 
-Policy for selecting the firmware file that goes into the LittleFS image:
+Policy for selecting the firmware files that go into the fwfs SPIFFS image:
 
-  - search for files matching "bootloader*.bin" in the *project root* (this folder)
-  - exactly one match must exist, otherwise exit non-zero with a clear error
-  - the file is copied into a temporary directory and used as the filesystem image input
+  - exactly one file matching "bootloader*.bin" must exist in the project root
+  - exactly one file matching "servomotor*.firmware" must exist in the project root
+  - both files are copied into a temporary directory and used as the filesystem image input
     so we do not need to modify the repo's `data/` directory.
 
 This script then:
@@ -144,6 +144,18 @@ def main(argv: list[str]) -> int:
         with tempfile.TemporaryDirectory(prefix=".fwfs_data_", dir=str(project_root)) as tmpdir:
             tmp_path = Path(tmpdir)
             shutil.copy2(fw_bin, tmp_path / spiffs_name)
+
+            # Stage servomotor assets (Arduino lib + renamed firmware file).
+            subprocess.run(
+                [
+                    sys.executable,
+                    "tools/stage_servomotor_assets.py",
+                    "--fwfs-data-dir",
+                    str(tmp_path),
+                ],
+                check=True,
+            )
+
             env["FWFS_DATA_DIR"] = str(tmp_path)
 
             _run(["pio", "run", "-t", "buildfwfs"], env=env)

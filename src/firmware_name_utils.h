@@ -19,7 +19,6 @@ static constexpr size_t k_max_basename_len = 31;
 // Returns true on success and writes a NUL-terminated basename to out.
 // On failure, returns false and writes a short error string to err (if provided).
 bool normalize_uploaded_firmware_filename(const char *incoming_filename, char *out, size_t out_cap, char *err,
-                                         size_t err_cap);
+                                          size_t err_cap);
 
 }  // namespace firmware_name_utils
-

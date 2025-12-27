@@ -166,9 +166,20 @@ run_step \
   /usr/bin/clang++ -std=c++17 -Wall -Wextra -Wpedantic -Werror \
   "$ROOT_DIR/testdata/test_firmware_name_utils.cpp" \
   "$ROOT_DIR/src/firmware_name_utils.cpp" \
+  "$ROOT_DIR/src/filename_normalizer.cpp" \
   -I"$ROOT_DIR" \
   -o "$TMP_LOG_DIR/test_firmware_name_utils" \
   && "$TMP_LOG_DIR/test_firmware_name_utils"
+
+run_step \
+  "host_unit_filename_normalizer" \
+  "Validate generic filename normalizer (bootloader + servomotor rules)" \
+  /usr/bin/clang++ -std=c++17 -Wall -Wextra -Wpedantic -Werror \
+  "$ROOT_DIR/testdata/test_filename_normalizer.cpp" \
+  "$ROOT_DIR/src/filename_normalizer.cpp" \
+  -I"$ROOT_DIR" \
+  -o "$TMP_LOG_DIR/test_filename_normalizer" \
+  && "$TMP_LOG_DIR/test_filename_normalizer"
 
 # 3) Upload firmware.
 run_step \

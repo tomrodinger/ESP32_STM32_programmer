@@ -20,6 +20,10 @@ void print_status();
 // Returns true if the filesystem root is accessible (even if list is empty).
 bool list_firmware_basenames(String *out, size_t out_cap, size_t *out_count);
 
+// Enumerate servomotor main firmware files (basenames, no leading "/") matching the pattern "SM*".
+// Returns true if the filesystem root is accessible (even if list is empty).
+bool list_servomotor_firmware_basenames(String *out, size_t out_cap, size_t *out_count);
+
 // Location (within SPIFFS) where we persist the active firmware selection.
 // The file contains a single line: the selected firmware basename (no leading "/").
 const char *active_firmware_selection_path();
@@ -56,5 +60,9 @@ bool reconcile_active_selection(String *out_active_path);
 // If out_auto_selected is non-null, it is set to true only when the function
 // auto-selected and persisted a firmware file due to "exactly one BL*" policy.
 bool reconcile_active_selection_ex(String *out_active_path, bool *out_auto_selected);
+
+// Active selection for servomotor main firmware file (SM*).
+bool get_active_servomotor_firmware_path(String &out_path);
+bool reconcile_active_servomotor_selection_ex(String *out_active_path, bool *out_auto_selected);
 
 }  // namespace firmware_fs

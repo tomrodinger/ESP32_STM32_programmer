@@ -15,6 +15,10 @@
 #include "serial_log.h"
 #include "wifi_web_ui.h"
 
+#include "unit_context.h"
+
+#include "mode2_loop.h"
+
 #include "ram_log.h"
 #include "tee_log.h"
 
@@ -78,9 +82,18 @@ static void print_user_pressed_banner(char c) {
   }
 }
 
+static void print_mode1_banner() {
+  LOG().println("========================================");
+  LOG().println("      MODE 1: SWD Programming Mode     ");
+  LOG().println("========================================");
+  LOG().println("Press 'h' for help, '2' to switch to RS485 testing mode");
+}
+
 static void print_help() {
   LOG().println("Commands:");
   LOG().println("  h = help");
+  LOG().println("  1 = stay in Mode 1 (this mode)");
+  LOG().println("  2 = switch to Mode 2 (RS485 Testing)");
   LOG().println("  f = filesystem status (SPIFFS) + list files");
   LOG().println("  F = select firmware file (uses active selection; auto-select if exactly one BL* exists)");
   LOG().println("  i = reset + read DP IDCODE");
@@ -88,7 +101,6 @@ static void print_help() {
   LOG().println("  S<serial> = set next serial (append USERSET_<serial>) (example: S1000)");
   LOG().println("  l = print logs to Serial (/log.txt + consumed serial record; prints last 50 records each)");
   LOG().println("  R = let firmware run: clear debug-halt state, pulse NRST, then release SWD pins");
-  LOG().println("  T = SWD smoke test (DP power-up handshake + AHB-AP IDR)");
   LOG().println("  t = terminal: dump RAM terminal buffer to USB serial");
   LOG().println("  m = memory: print heap/PSRAM stats");
   LOG().println("  d = toggle SWD verbose diagnostics");
@@ -230,6 +242,14 @@ static bool run_production_sequence(const char *source) {
   LOG().printf("Production consumed serial=%lu unique_id=0x%08lX%08lX\n", (unsigned long)consumed.serial,
               (unsigned long)(consumed.unique_id >> 32), (unsigned long)(consumed.unique_id & 0xFFFFFFFFu));
 
+  {
+    unit_context::Context ctx;
+    ctx.valid = true;
+    ctx.serial = consumed.serial;
+    ctx.unique_id = consumed.unique_id;
+    unit_context::set(ctx);
+  }
+
   if (!cmd_write_with_product_info(consumed.serial, consumed.unique_id)) {
     LOG().println("ERROR: Production sequence aborted at step 'w' (write)");
     (void)serial_log::append_summary_with_unique_id(completed_steps.c_str(), consumed.serial, consumed.unique_id, /*ok=*/false);
@@ -309,6 +329,14 @@ static bool cmd_write() {
   LOG().printf("Write will use serial=%lu unique_id=0x%08lX%08lX\n", (unsigned long)reserved.serial,
               (unsigned long)(reserved.unique_id >> 32), (unsigned long)(reserved.unique_id & 0xFFFFFFFFu));
 
+  {
+    unit_context::Context ctx;
+    ctx.valid = true;
+    ctx.serial = reserved.serial;
+    ctx.unique_id = reserved.unique_id;
+    unit_context::set(ctx);
+  }
+
   // Benchmark 'w' without changing SWD clock:
   // - keep existing verbose setting for connect reliability
   // - disable verbose only during programming (Serial prints dominate runtime)
@@ -367,6 +395,19 @@ static bool cmd_write() {
   LOG().println(ok ? "Write OK" : "Write FAIL");
   return ok;
 }
+
+static bool select_servomotor_firmware_path(String &out_path) {
+  if (!ensure_fs_mounted()) return false;
+  bool auto_sel = false;
+  const bool ok = firmware_fs::reconcile_active_servomotor_selection_ex(&out_path, &auto_sel);
+  if (!ok) return false;
+  if (auto_sel && out_path.startsWith("/")) {
+    const String base = out_path.substring(1);
+    if (base.length() > 0) (void)serial_log::append_event("AUTOSELECT_SM", base.c_str());
+  }
+  return true;
+}
+
 
 static void print_hex_dump_16(uint32_t base_addr, const uint8_t *data, uint32_t len) {
   if (!data) return;
@@ -607,29 +648,6 @@ static bool cmd_read_flash_first_8() {
   return true;
 }
 
-static bool cmd_swd_smoke_test() {
-  LOG().println("SWD smoke test...");
-  // Assumes SWD already attached via 'i' or the boot-time auto attempt.
-  uint8_t ack = 0;
-
-  // 2) DP power-up handshake
-  LOG().println("DP init + power-up...");
-  const bool dp_ok = swd_min::dp_init_and_power_up();
-  LOG().println(dp_ok ? "DP init OK" : "DP init FAIL");
-  if (!dp_ok) return false;
-
-  // 3) Release reset then read AHB-AP IDR (tests DP.SELECT + AP read semantics)
-  swd_min::set_nrst(false);
-  delay(5);
-
-  LOG().println("Reading AHB-AP IDR (AP register 0xFC)...");
-  uint32_t ap_idr = 0;
-  const bool ap_ok = swd_min::ap_read_reg(swd_min::AP_ADDR_IDR, &ap_idr, &ack);
-  LOG().printf("AP IDR: ok=%d ack=%u (%s) idr=0x%08lX\n", ap_ok ? 1 : 0, (unsigned)ack, swd_min::ack_to_str(ack),
-              (unsigned long)ap_idr);
-  return ap_ok;
-}
-
 static bool cmd_toggle_verbose() {
   const bool enabled = !swd_min::verbose_enabled();
   swd_min::set_verbose(enabled);
@@ -750,6 +768,8 @@ void setup() {
 
   // Do one attempt automatically on boot.
   print_idcode_attempt();
+
+  print_mode1_banner();
 }
 
 static void cmd_print_ram_terminal_buffer() {
@@ -984,6 +1004,16 @@ void loop() {
   print_user_pressed_banner(c);
 
   switch (c) {
+    case '1':
+      LOG().println("Already in Mode 1 (SWD Programming)");
+      break;
+
+    case '2':
+      LOG().println("Switching to Mode 2 (RS485 Testing)...");
+      mode2_loop::run();
+      print_mode1_banner();
+      break;
+
     case 'f':
       if (ensure_fs_mounted()) firmware_fs::print_status();
       break;
@@ -1067,10 +1097,6 @@ void loop() {
 
     case 'R':
       cmd_reset_pulse_run();
-      break;
-
-    case 'T':
-      cmd_swd_smoke_test();
       break;
 
     case 't':

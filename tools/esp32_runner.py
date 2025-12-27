@@ -42,7 +42,7 @@ except Exception as e:  # pragma: no cover
 #
 # Production sequence is bound to the spacebar (ASCII 0x20). We support it via
 # the explicit `--space` flag (rather than a short `- ` option).
-ALLOWED_CMDS = set("hidbtcpermwvasl") | {"r", "p", " ", "f", "F", "S"}
+ALLOWED_CMDS = set("hidbtcpermwvasluP") | {"r", "p", " ", "f", "F", "S"}
 
 
 def _run(cmd: List[str]) -> None:
@@ -147,6 +147,10 @@ def _send_cmd_and_capture(ser: "serial.Serial", cmd_char: str, quiet_s: float, m
         stop_markers = ["Filesystem status:"]
     elif lead == "i":
         stop_markers = ["DP IDCODE:", "DP IDCODE read failed"]
+    elif lead == "u":
+        stop_markers = ["Upgrade OK", "Upgrade FAIL", "Servomotor upgrade OK"]
+    elif lead == "P":
+        stop_markers = ["Get product info OK", "Get product info FAIL", "GET_PRODUCT_INFO"]
 
     long_running = lead in {"e", "w", "v", " "}
     buf = ""
