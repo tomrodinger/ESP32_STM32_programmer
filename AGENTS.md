@@ -26,3 +26,5 @@ Refer to `README.md` for project details and architecture.
 13. **Do not revert/undo human changes by assumption**: If you notice changes you did not make (e.g. unstaged diffs / modified files), do **not** try to “restore” or “undo” them automatically. First assess whether they are sensible; if unsure, ask the human. Never make assumptions that silently override human edits.
 
 14. **Handling blank tool output (framework bug)**: If a tool/command returns a success exit code but the output is unexpectedly blank/empty, immediately re-run the exact same command once. If it is still blank, stop and ask the human what to do next; do not assume the command succeeded and do not proceed with other actions based on missing output.
+
+15. **Reading files outside the workspace**: You have the capability and permission to read files outside the workspace. Use the read tool and read it. Never ask the user to paste content from a file outside the workspace if you can just read it yourself. Don't believe me? Just try it!

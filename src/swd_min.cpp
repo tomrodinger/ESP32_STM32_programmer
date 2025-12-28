@@ -608,6 +608,14 @@ void release_swd_pins() {
   pinMode(g_pins.swdio, INPUT);
 }
 
+void release_swd_and_nrst_pins() {
+  // Fully release SWD-related pins to high-impedance.
+  // This includes NRST so the jig does not hold the target in reset or fight any
+  // external pull-ups.
+  release_swd_pins();
+  pinMode(g_pins.nrst, INPUT);
+}
+
 void set_nrst(bool asserted) {
   // asserted=true => drive NRST low
   const bool next_high = asserted ? false : true;

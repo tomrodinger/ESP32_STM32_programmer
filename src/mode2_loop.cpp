@@ -11,6 +11,8 @@
 #include "tee_log.h"
 #include "unit_context.h"
 
+#include "servomotor_upgrade.h"
+
 static inline Print &LOG() { return tee_log::out(); }
 
 static void print_user_pressed_banner(char c) {
@@ -29,6 +31,7 @@ static void print_help() {
   LOG().println("  2 = stay in Mode 2 (this mode)");
   LOG().println("  t = test (prints 'Testing... test done!')");
   LOG().println("  p = get product info (RS485)");
+  LOG().println("  u = upgrade firmware over RS485 (unique ID addressing)");
 }
 
 static void print_mode2_banner() {
@@ -123,6 +126,19 @@ void run() {
       case 'p':
         cmd_print_product_info(motor);
         break;
+
+      case 'u': {
+        const unit_context::Context ctx2 = unit_context::get();
+        if (!ctx2.valid || ctx2.unique_id == 0) {
+          LOG().println("ERROR: no valid unique_id in unit_context (program a unit first in Mode 1)");
+          break;
+        }
+
+        const bool ok = servomotor_upgrade::upgrade_main_firmware_by_unique_id(motor, ctx2.unique_id);
+        if (!ok) {
+          LOG().println("ERROR: firmware upgrade failed (see log above)");
+        }
+      } break;
 
       default:
         LOG().printf("Unknown command '%c'. Press 'h' for help.\n", c);

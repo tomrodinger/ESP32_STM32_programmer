@@ -1,193 +1,240 @@
-# Part 2 plan: program main firmware over RS485 (ESP32-S3 jig)
+# Plan: add Mode 2 `u` command to upgrade target firmware over RS485 (unique ID addressing)
 
-## My understanding of the project (current state)
+This plan is derived directly from the known-good host upgrader script [`upgrade_firmware.py`](../../Servomotor/python_programs/upgrade_firmware.py:1) and from the Arduino Servomotor library vendored in this repo under [`lib/Servomotor/`](lib/Servomotor/:1).
 
-1. This repo implements **Part 1 of 3**: programming an STM32 target over SWD from an ESP32-S3.
-   - The target firmware image for Part 1 is stored in the ESP32 filesystem partition `fwfs` (mounted as SPIFFS at `/spiffs`). See [`cpp.firmware_fs::begin()`](src/firmware_fs.cpp:54).
-   - File selection today is based on `BL*` naming (bootloader images) and a persisted selection file. See [`cpp.firmware_fs::get_active_firmware_path()`](src/firmware_fs.cpp:170).
-   - The programming flow (`i/e/w/v/R` and production `<space>`) is implemented in [`src/main.cpp`](src/main.cpp:1).
+## Goal
 
-2. During Part 1 programming (`w`), the jig assigns and injects **serial number + unique ID** into the target image before flashing.
-   - The production flow already has `serial` and `unique_id` available in memory as `serial_log::Consumed consumed` within [`cpp.run_production_sequence()`](src/main.cpp:180).
+Add a new Mode 2 command:
 
-3. Part 2 is to program a **second firmware file** (main firmware) using a **different physical interface and protocol**:
-   - Transport: **RS485**
-   - Protocol: **Servomotor new protocol only**, CRC32 enabled
-   - Addressing: **targeted by unique ID** (not broadcast)
-   - The unique ID to address is the same one we just programmed into the device during Part 1, so we must retain it through Part 2 (and later Part 3 tests).
+- `u` = upgrade the motor controller main firmware over RS485.
 
-4. You placed the main firmware file in the repo root:
-   - `servomotor_M17_fw0.14.0.0_scc3_hw1.5.firmware`
-   - You want it included in the filesystem image (the `fwfs` SPIFFS partition) and stored at the filesystem root (SPIFFS is effectively flat).
+Constraints you set:
 
-## Filename renaming scheme (for SPIFFS 31-char basename limit)
+- Firmware file is already stored on the ESP32 filesystem (partition `fwfs`).
+- Device addressing must use the **unique ID**.
+- With unique-ID addressing, **each packet must be ACKed**.
+- If any page is not ACKed (timeout or other error), abort and print a clear error.
 
-This repo already enforces a 31-character maximum firmware basename due to SPIFFS limits. See [`cpp.firmware_fs::k_max_firmware_basename_len`](src/firmware_fs.h:10).
+## Relevant existing code (what we will reuse)
 
-Implementation note: filename normalization is implemented via one generic helper in its own module: [`cpp.filename_normalizer::normalize_basename()`](src/filename_normalizer.cpp:66). Bootloader and servomotor naming policies are thin wrappers around it.
+Mode 2 already creates a `Servomotor motor` object and already proves RS485 comms via the `p` command:
 
-For this **main firmware** file type, you specified a new renaming algorithm:
+- Mode 2 loop: [`src/mode2_loop.cpp`](src/mode2_loop.cpp:1)
+- `p` implementation uses [`cpp.Servomotor::getProductInfo()`](lib/Servomotor/Servomotor.h:462)
 
-1. Take the basename (strip any directories).
-2. If it starts with `servomotor`, replace that prefix with `SM`.
-3. If it ends with `.firmware`, strip that suffix.
-4. Ensure the final basename length is **<= 31** characters or less.
+Mode 2 already pulls the most-recently-programmed device ID and configures the motor for extended addressing:
 
-Applying that to the provided file:
+- unit context: [`src/unit_context.h`](src/unit_context.h:10)
+- read context: [`cpp.unit_context::get()`](src/unit_context.cpp:19)
+- set unique ID: [`cpp.Servomotor::useUniqueId()`](lib/Servomotor/Servomotor.h:351)
 
-- Input: `servomotor_M17_fw0.14.0.0_scc3_hw1.5.firmware`
-- Output: `SM_M17_fw0.14.0.0_scc3_hw1.5` (28 characters)
+So `u` must simply reuse the existing `motor` object.
 
-### Policy for future longer filenames
+## Firmware file discovery on ESP32
 
-For now, the cleanest deterministic behavior is:
+The filesystem partition is mounted as SPIFFS, using label `fwfs`:
 
-- If the normalized basename is `> 31`, fail the staging step with a clear error (so we do not silently create ambiguous/duplicate names).
+- mount: [`cpp.firmware_fs::begin()`](src/firmware_fs.cpp:54)
 
-If you prefer an automatic truncation strategy (and how to avoid collisions), we can define it later; I will not guess without your direction.
+Selection rule (deterministic):
 
-## How the main firmware file gets into the ESP32 filesystem
+1. List files in filesystem root that start with `SM` using [`cpp.firmware_fs::list_servomotor_firmware_basenames()`](src/firmware_fs.cpp:112).
+2. If **exactly one** is found, use `/<basename>` as the firmware path.
+3. If **zero** are found: error and abort.
+4. If **multiple** are found: error listing candidates and abort.
 
-The repo’s `fwfs` image is built from the host directory [`data/`](data/:1) using the custom targets defined in [`python.tools/pio_fwfs_targets.py`](tools/pio_fwfs_targets.py:1).
+## Firmware file format (from the Python upgrader)
 
-Plan for Part 2 assets:
+From [`read_binary()`](../../Servomotor/python_programs/upgrade_firmware.py:110), the file structure is:
 
-1. Stage the renamed firmware file into [`data/`](data/:1) so it ships in the SPIFFS image:
-   - `data/SM_M17_fw0.14.0.0_scc3_hw1.5`
-2. Keep the existing `BL*` bootloader file approach unchanged.
+- `model_code`: 8 bytes
+- `firmware_compatibility_code`: 1 byte
+- `firmware_data`: remaining bytes
 
-## Servomotor RS485 protocol approach (matching your known-good Python behavior)
+The on-wire payload for the firmware upgrade command is (also matches [`arduino.firmwareUpgradePayload`](lib/Servomotor/Servomotor.h:142)):
 
-You indicated:
+- `model_code` (8)
+- `firmware_compatibility_code` (1)
+- `page_number` (1)
+- `page_data` (2048)
 
-- ESP32 cannot run Python.
-- We should implement the upgrade using your Arduino library.
-- We should use **new protocol only** and **address by unique ID**.
-- Direction control is handled by RS485 hardware (auto direction), so we should not need to manage DE/RE.
+Total = 2058 bytes.
 
-From the Arduino library:
+## Required transformation of firmware_data before paging (critical)
 
-- Command IDs include `FIRMWARE_UPGRADE = 23` and `SYSTEM_RESET = 27` in [`arduino.Commands`](../../Servomotor/Arduino_library/Commands.h:9).
-- There is a high-level API to send a firmware page: [`cpp.Servomotor::firmwareUpgrade()`](../../Servomotor/Arduino_library/Servomotor.cpp:937).
-- The underlying comms layer supports CRC32 and extended addressing by unique ID: [`cpp.Communication::sendCommandByUniqueId()`](../../Servomotor/Arduino_library/Communication.cpp:83).
+From the host upgrader main flow (padding, size word rewrite, CRC append):
 
-### Firmware payload format for `FIRMWARE_UPGRADE`
+- padding: [`upgrade_firmware.py`](../../Servomotor/python_programs/upgrade_firmware.py:404)
+- size+CRC calculation: [`upgrade_firmware.py`](../../Servomotor/python_programs/upgrade_firmware.py:419)
+- rewrite/append: [`upgrade_firmware.py`](../../Servomotor/python_programs/upgrade_firmware.py:430)
 
-The Arduino library defines the firmware page payload as 2058 bytes (`firmwarePage[2058]`) in [`arduino.firmwareUpgradePayload`](../../Servomotor/Arduino_library/Servomotor.h:142).
+Algorithm to mirror exactly:
 
-That matches the structure used in your Python process:
+1. Pad `firmware_data` with `0x00` until `len(firmware_data) % 4 == 0`.
+2. Compute:
+   - `firmware_size_words = (len(firmware_data) / 4) - 1`
+   - `firmware_crc32 = crc32(firmware_data[4:])`
+3. Build transformed payload:
+   - `tx = firmware_size_words (4 bytes, little endian) + firmware_data[4:] + firmware_crc32 (4 bytes, little endian)`
 
-- `model_code` (8 bytes)
-- `firmware_compatibility_code` (1 byte)
-- `page_number` (1 byte)
-- `page_data` (2048 bytes)
+CRC32 implementation to use (already in this repo):
 
-Total: `8 + 1 + 1 + 2048 = 2058`.
+- [`cpp.calculate_crc32()`](lib/Servomotor/Communication.h:53) implemented in [`cpp.calculate_crc32()`](lib/Servomotor/Communication.cpp:39)
 
-So the ESP32 implementation should:
+## Paging rules
 
-1. Read the `.firmware` file from SPIFFS.
-2. Parse out `model_code`, `firmware_compatibility_code`, and the remainder `firmware_data`.
-3. Apply the same “prepare data before paging” transformations as your Python process (padding / CRC32 / size word rewrite), so the device’s bootloader receives exactly what it expects.
-4. Iterate page-by-page, building each 2058-byte page payload and calling `firmwareUpgrade(unique_id, page)`.
-5. Rate-limit page transmission if required (in Python you needed delays to avoid overflowing the device).
-6. Send `systemReset(unique_id)` at the end to reboot into the new main firmware.
+Constants from the host upgrader:
 
-### Bootloader-entry timing
+- page size: 2048 bytes ([`FLASH_PAGE_SIZE`](../../Servomotor/python_programs/upgrade_firmware.py:62))
+- bootloader pages: 5 ([`BOOTLOADER_N_PAGES`](../../Servomotor/python_programs/upgrade_firmware.py:63))
+- first firmware page number: 5 ([`FIRST_FIRMWARE_PAGE_NUMBER`](../../Servomotor/python_programs/upgrade_firmware.py:64))
+- last firmware page number: 30 ([`LAST_FIRMWARE_PAGE_NUMBER`](../../Servomotor/python_programs/upgrade_firmware.py:65))
 
-Your Python process resets into bootloader mode first, then sends pages quickly enough to beat the bootloader timeout.
+Send `tx` in 2048-byte pages starting at page number 5.
 
-On ESP32 we’ll mirror that by:
+For each page:
 
-1. Ensuring the STM32 is running the bootloader (after Part 1 SWD flash, we already do an `R` reset pulse in production).
-2. Immediately starting RS485 comms and sending `SYSTEM_RESET` (targeted by unique ID) to force bootloader entry.
-3. Waiting a short fixed delay before the first page (same logic as Python).
+1. Copy 2048 bytes from `tx` (pad final page with 0x00 to exactly 2048).
+2. Construct `firmwarePage[2058]` = header (10 bytes) + page_data (2048).
+3. Send it and wait for ACK.
+4. If `page_number > 30`, abort with error.
 
-## How Part 2 integrates into the jig state machine
+## Reset into bootloader + timing
 
-### A) Keep a “unit context” in RAM for Part 1 → Part 2 → Part 3
+Host upgrader resets into bootloader then waits 70ms:
 
-Because Part 2 must address the device by **unique ID**, we need to preserve the ID assigned during Part 1.
+- reset: [`upgrade_firmware_new_protocol()`](../../Servomotor/python_programs/upgrade_firmware.py:295)
+- wait: [`WAIT_FOR_RESET_TIME`](../../Servomotor/python_programs/upgrade_firmware.py:68)
 
-Plan:
+ESP32 flow (current jig behavior):
 
-1. Introduce a single struct that holds per-unit context:
-   - `serial_number`
-   - `unique_id`
-   - “valid” flag
-   - potentially also: firmware filenames used (BL + SM)
+- The Mode 2 `u` command does **not** send any reset commands.
+- The operator must ensure the target is already in the bootloader (for example: run Mode 1 `R`, then press `2` to enter Mode 2).
+- Then `u` begins sending firmware pages immediately.
 
-2. Populate it at the same time we already “consume for write” in production.
-3. Reuse it for Part 2 and later Part 3 tests.
+## ACK / error handling
 
-Implementation detail: today the production flow already has `consumed.serial` and `consumed.unique_id` in scope in [`cpp.run_production_sequence()`](src/main.cpp:180). We’ll formalize this into a stored context so later steps don’t need to re-parse logs.
+With unique ID addressing, every firmware page must be acknowledged.
 
-### B) Add a new command for RS485 upgrade
+Implementation check after each page:
 
-Add a new serial console command, for example:
+- use [`cpp.Servomotor::getError()`](lib/Servomotor/Servomotor.h:356)
+- timeout code is [`COMMUNICATION_ERROR_TIMEOUT`](lib/Servomotor/Communication.h:11)
 
-- `u` = upgrade main firmware over RS485 using the staged `SM*` file and addressing by the most recently programmed `unique_id`.
+Rule:
 
-Also extend the production `<space>` flow to include Part 2:
+- If `motor.getError() != 0` after sending a page, abort immediately and print:
+  - page number
+  - error code
+  - if timeout, explicitly print `timeout`
 
-Current production: `i -> e -> w -> v -> R`
+Important: do not implement any “broadcast/no-ACK fallback” for `u`.
 
-Proposed production (Part 1 + Part 2):
+## Chunking vs delays (to prevent dropped bytes)
 
-- `i -> e -> w -> v -> R -> u`
+The host upgrader sends each large firmware packet in ~1000-byte chunks with a short delay:
 
-Rationale: `R` makes the target execute the freshly flashed bootloader, which is required to accept the RS485 firmware upgrade.
+- chunk loop: [`program_one_page()`](../../Servomotor/python_programs/upgrade_firmware.py:218)
 
-If you want the final step to reboot into main firmware after `u`, then `u` itself should end with a `SYSTEM_RESET` over RS485.
+In this repo we will **not modify** the vendored Arduino library implementation.
 
-## Filesystem selection policy for the main firmware (SM*)
+Mitigation we can do strictly in the jig application code (without changing the library):
 
-We should mirror the existing bootloader file selection policy:
+- Add an optional fixed delay *between pages* if needed (still requiring ACK per page), similar in spirit to [`DELAY_AFTER_EACH_PAGE`](../../Servomotor/python_programs/upgrade_firmware.py:69) but only used if observed necessary.
 
-- For Part 2, scan for exactly one file whose basename starts with `SM`.
-- If exactly one exists, auto-select it.
-- If multiple exist, refuse to program (deterministic production requirement).
-- generalize the existing `firmware_fs` selection logic to accept a prefix like `BL` vs `SM`.
+If inter-page delay is not sufficient and we still see dropped bytes, the deficiency would be that the library transmits a very large frame without pacing, while the known-good host script demonstrates that pacing can be required. In that case, we would need your approval to change the library.
 
-## Script requested: copy Arduino library files + stage firmware file
+The Arduino library currently writes payloads in a single call inside [`cpp.Communication::sendCommandCore()`](lib/Servomotor/Communication.cpp:87). 
 
-You requested a script that does both:
+## Mode 2 `u` command: end-to-end flow
 
-1. Copy the required Arduino library sources from your Servomotor repo into this repo.
-2. Apply the renaming algorithm and stage the `.firmware` file into [`data/`](data/:1).
+1. Confirm unit context unique ID exists (non-zero). See [`cpp.unit_context::get()`](src/unit_context.cpp:19).
+2. Mount firmware filesystem via [`cpp.firmware_fs::begin()`](src/firmware_fs.cpp:54).
+3. Locate firmware file `/<SM...>` via [`cpp.firmware_fs::list_servomotor_firmware_basenames()`](src/firmware_fs.cpp:112).
+4. Open and read file header + data.
+5. Transform firmware_data into `tx` exactly as described above.
+6. For pages starting at page 5:
+   - call [`cpp.Servomotor::firmwareUpgrade()`](lib/Servomotor/Servomotor.h:465)
+   - check ACK via [`cpp.Servomotor::getError()`](lib/Servomotor/Servomotor.h:356)
+   - abort on any error
+7. After last page, do **not** reset from the jig. Reboot strategy is an operator/system decision.
+8. Post-check (out of scope for this task): query firmware version using [`cpp.Servomotor::getFirmwareVersion()`](lib/Servomotor/Servomotor.h:471).
 
-Plan:
+---
 
-- Add a host-side script under [`tools/`](tools/:1), e.g. `tools/stage_servomotor_assets.py`.
-- The script will:
-  1. Copy a curated subset of files from the Arduino library into a PlatformIO-friendly library directory, e.g. `lib/Servomotor/`.
-     - Required core files (based on includes):
-       - `Servomotor.cpp/.h`
-       - `Communication.cpp/.h`
-       - `Commands.h`
-       - `DataTypes.cpp/.h`
-       - `Utils.h`
-       - `AutoGeneratedUnitConversions.cpp/.h`
-     - Exclude tests, desktop emulator, and scripts.
-  2. Normalize the firmware filename per the `servomotor` → `SM` rule and `.firmware` stripping.
-  3. Copy `servomotor_M17_fw0.14.0.0_scc3_hw1.5.firmware` into `data/<normalized_name>`.
-  4. Print exactly what it did (source paths, destination paths) and fail loudly on any mismatch.
+## Current status (handoff to next AI)
 
-Integrate this into [`build_and_upload.py`](build_and_upload.py:1) so a single command stages both BL and SM assets before `pio run -t buildfwfs`.
+### What is implemented and working
 
-## Test and verification plan (implementation phase)
+1. Mode 2 command `u` exists and attempts to send the firmware upgrade stream over RS485:
+   - command dispatch: [`src/mode2_loop.cpp`](src/mode2_loop.cpp:1)
+   - implementation: [`cpp.servomotor_upgrade::upgrade_main_firmware_by_unique_id()`](src/servomotor_upgrade.cpp:63)
 
-### Automated checks
+2. Firmware file discovery on ESP32 works:
+   - it auto-selects exactly one `SM*` file from SPIFFS root via [`cpp.firmware_fs::list_servomotor_firmware_basenames()`](src/firmware_fs.cpp:112)
+   - it reads `model_code` (8 bytes) + `firmware_compatibility_code` (1 byte) from the file header.
 
-1. `pio run` (warnings treated as failures)
-2. `./test.sh` (existing repo automated checks)
-3. Add unit tests for the new filename normalization logic, similar to [`cpp.test_firmware_name_utils`](testdata/test_firmware_name_utils.cpp:1).
-4. Add a unit test for uploading the firmware via the 'u' command. This passes if every uploaded page is acked.
+3. Data transformation matches the authoritative host upgrader:
+   - pad firmware data to 4-byte multiple
+   - compute `firmware_size_words = (len(data)/4) - 1`
+   - compute `crc32(data[4:])`
+   - build `tx = size_words(LE32) + data[4:] + crc32(LE32)`
+   - then page `tx` into 2048-byte chunks, each sent with the required per-page header (model+compat+page#).
+   Reference script: [`upgrade_firmware.py`](../../Servomotor/python_programs/upgrade_firmware.py:404)
 
-### Manual hardware test plan (required because this changes HW behavior)
+4. Mode switching / SWD pin handling was adjusted so RS485 can work reliably:
+   - entering Mode 2 floats SWD-related pins via [`cpp.swd_min::release_swd_and_nrst_pins()`](src/swd_min.cpp:611), which
+   seems to be necessary to be able to software reset the device and
+   keep it in a working state.
+   - returning to Mode 1 restores SWD pins via [`cpp.swd_min::begin()`](src/swd_min.cpp:588)
+   Implementation glue: [`src/main.cpp`](src/main.cpp:85)
 
-1. Program a unit with the existing `<space>` flow and confirm Part 1 succeeds.
-2. Run `u` and confirm the RS485 upgrade completes (no timeouts, no CRC errors).
-3. Confirm the unit reboots into main firmware (e.g., via a known RS485 query such as firmware version).
+### What is still failing
 
-Note: per [`AGENTS.md`](AGENTS.md:1), the implementation phase will include a short numbered manual test plan and will wait for your explicit confirmation before declaring completion.
+- The *first* firmware page transmission (page 5) does not get ACKed (timeout) when sent from the ESP32 implementation, while the Python upgrader can perform the same operation successfully on the same hardware (firmware being sent from a Mac computer via the upgrade_firmware.py program).
+- This strongly suggests a mismatch between the Python sender behavior and the ESP32/Arduino-library sender behavior for the very large firmware-upgrade frames.
+
+### Most likely root cause candidates (do not assume; investigate)
+
+1. **TX pacing / UART buffering differences**
+   - The Python upgrader sends large packets in chunks with delays:
+     - see chunk loop in [`program_one_page()`](../../Servomotor/python_programs/upgrade_firmware.py:218)
+   - The Arduino library currently transmits the full payload via a single `_serial.write(payload, payloadSize)` call in [`cpp.Communication::sendCommandCore()`](lib/Servomotor/Communication.cpp:176)
+   - If the RS485/serial path drops bytes without pacing, the device will discard the packet (CRC mismatch / framing issue) and therefore not ACK.
+
+3. **Protocol mismatch on the wire**
+   - Less likely, because the same library *does* work for smaller commands (Mode 2 `p`).
+   - Still, capture the raw bytes of the first firmware-upgrade packet from ESP32 and compare to Python’s packet (size encoding + CRC32) to eliminate this.
+
+### Constraints / decisions made
+
+- The vendored Arduino library under [`lib/Servomotor/`](lib/Servomotor/:1) must not be modified without explicit approval.
+- `u` was changed to **not** send RS485 `SYSTEM_RESET` before/after the upgrade; the operator is expected to place the target into bootloader mode separately.
+
+### Recommended next debug steps (for next AI)
+
+1. Add diagnostic instrumentation *without changing the protocol*:
+   - log the first page packet length and optionally CRC computed over the outgoing bytes. This already happens in verbose mode.
+
+2. Compare ESP32 packet vs Python packet:
+   - ensure the same size-byte encoding rules are used and CRC32 covers the same byte sequence.
+
+3. If packet bytes match, focus on pacing/timeout:
+   - try increasing the inter-page delay and/or adding a pre-delay before sending page 5 (application-level, still requiring ACK)
+   - if still failing, seek approval to patch the Arduino library to implement chunked transmission for large payloads and/or increase timeout.
+
+## Implementation locations (next mode)
+
+- Add `u` handling to the switch in [`src/mode2_loop.cpp`](src/mode2_loop.cpp:105).
+- Implement the file reading + paging logic in the existing module [`src/servomotor_upgrade.cpp`](src/servomotor_upgrade.cpp:1) and declare a clean API in [`src/servomotor_upgrade.h`](src/servomotor_upgrade.h:1).
+
+## Manual hardware test plan (required)
+
+1. Program a unit in Mode 1 so that `unit_context` contains a valid unique ID.
+2. Switch to Mode 2.
+3. Run `p` and confirm product info is readable.
+4. Run `u` and confirm:
+   - each page is ACKed (no timeouts)
+   - upgrade completes
+   - device resets into new firmware
+5. Run a version/info query after upgrade to confirm the new firmware is running. This is out of scope of this task but is definitly slated to be done in a following task.

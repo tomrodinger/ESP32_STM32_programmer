@@ -46,6 +46,11 @@ static void set_first_block_snapshot(const uint8_t *b0, uint32_t n) {
 
 static const swd_min::Pins PINS(35, 36, 37);
 
+// Mode switching policy:
+// - Entering Mode 2: float SWD-related pins so RS485 bootloader comms are not disturbed.
+// - Returning to Mode 1: restore SWD pin configuration before any SWD operation.
+static bool g_swd_pins_floating = false;
+
 // Production jig button:
 // - GPIO45 configured as INPUT_PULLUP
 // - external button pulls to GND when pressed
@@ -80,6 +85,25 @@ static void print_user_pressed_banner(char c) {
   } else {
     LOG().printf("=== User pressed 0x%02X ========================\n", (unsigned char)c);
   }
+}
+
+static void enter_mode1_swd_pin_state() {
+  // Mode 2 intentionally leaves SWD pins floating. Before executing any Mode 1
+  // command, ensure the SWD engine has its pins re-configured.
+  // swd_min's public entrypoints will also do this internally, but we make it
+  // explicit here so Mode 1 behavior is consistent even for commands that only
+  // touch NRST.
+  if (g_swd_pins_floating) {
+    swd_min::begin(PINS);
+    g_swd_pins_floating = false;
+  }
+}
+
+static void enter_mode2_floating_swd_pins() {
+  // When switching to Mode 2 (RS485), release SWD/NRST pins so they don't
+  // interfere electrically with the target firmware/bootloader.
+  swd_min::release_swd_and_nrst_pins();
+  g_swd_pins_floating = true;
 }
 
 static void print_mode1_banner() {
@@ -164,9 +188,6 @@ static void cmd_reset_pulse_run() {
   swd_min::set_nrst(true);
   delay(2);
   swd_min::set_nrst(false);
-
-  // After reset, avoid continuing to drive SWD lines; target firmware may repurpose them.
-  swd_min::release_swd_pins();
 }
 
 static bool cmd_reset_pulse_run_strict() {
@@ -183,9 +204,6 @@ static bool cmd_reset_pulse_run_strict() {
   swd_min::set_nrst(true);
   delay(2);
   swd_min::set_nrst(false);
-
-  // After reset, avoid continuing to drive SWD lines; target firmware may repurpose them.
-  swd_min::release_swd_pins();
   return true;
 }
 
@@ -1003,6 +1021,15 @@ void loop() {
   tee_log::set_capture_enabled(capture);
   print_user_pressed_banner(c);
 
+  // Mode switching pins policy:
+  // - Entering Mode 2: float SWD-related pins.
+  // - Any other Mode 1 command: ensure SWD pins are restored before execution.
+  if (c == '2') {
+    enter_mode2_floating_swd_pins();
+  } else {
+    enter_mode1_swd_pin_state();
+  }
+
   switch (c) {
     case '1':
       LOG().println("Already in Mode 1 (SWD Programming)");
@@ -1011,6 +1038,10 @@ void loop() {
     case '2':
       LOG().println("Switching to Mode 2 (RS485 Testing)...");
       mode2_loop::run();
+
+      // Mode 2 returns only when user requests Mode 1.
+      // Restore SWD pin state immediately so Mode 1 is ready.
+      enter_mode1_swd_pin_state();
       print_mode1_banner();
       break;
 

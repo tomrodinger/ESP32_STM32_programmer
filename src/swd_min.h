@@ -32,6 +32,11 @@ void begin(const Pins &pins);
 // those pins as GPIO without electrical contention from the host.
 void release_swd_pins();
 
+// Release SWD pins (SWCLK/SWDIO) AND NRST to high-impedance INPUT.
+// This is useful when you want the target to reboot/run without the jig driving
+// any of the SWD-related pins electrically.
+void release_swd_and_nrst_pins();
+
 // Enable verbose SWD diagnostics printed to Serial (best for bench debugging).
 // Default: true.
 void set_verbose(bool enabled);
