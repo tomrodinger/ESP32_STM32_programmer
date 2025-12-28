@@ -119,8 +119,11 @@ def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description="Stage Servomotor Arduino library + main firmware file for fwfs image")
     ap.add_argument(
         "--fwfs-data-dir",
-        required=True,
-        help="Directory to receive the renamed servomotor firmware file (input directory for buildfwfs)",
+        default=None,
+        help=(
+            "Directory to receive the renamed servomotor firmware file (input directory for buildfwfs). "
+            "Default: <repo>/data"
+        ),
     )
     ap.add_argument(
         "--skip-library-copy",
@@ -131,8 +134,10 @@ def main(argv: list[str]) -> int:
 
     repo_root = _repo_root()
     project_root = repo_root
-    fwfs_data_dir = Path(args.fwfs_data_dir).resolve()
-    if not fwfs_data_dir.exists() or not fwfs_data_dir.is_dir():
+    fwfs_data_dir = (repo_root / "data") if (args.fwfs_data_dir is None) else Path(args.fwfs_data_dir)
+    fwfs_data_dir = fwfs_data_dir.resolve()
+    fwfs_data_dir.mkdir(parents=True, exist_ok=True)
+    if not fwfs_data_dir.is_dir():
         _die(f"--fwfs-data-dir is not a directory: {fwfs_data_dir}")
 
     # 1) Copy Arduino library sources.

@@ -1045,25 +1045,19 @@ void loop() {
 
     case 'S':
       {
-        // Parse decimal digits that follow 'S' on the same line, e.g. "S12345\n".
-        // If no digits are present, do nothing (keeps it safe for accidental presses).
+        // Parse decimal digits that follow 'S' on the same line.
+        // Example: type "S1000" and press Enter.
+        // Using readStringUntil() makes this robust to terminal/typing delays.
+        Serial.setTimeout(2000);
+        String line = Serial.readStringUntil('\n');
+        line.trim();  // removes spaces and trailing '\r'
+
         String digits;
-        const uint32_t start_ms = millis();
-        while ((uint32_t)(millis() - start_ms) < 250) {
-          if (!Serial.available()) {
-            delay(1);
-            continue;
-          }
-          const char d = (char)Serial.peek();
-          if (d == '\n' || d == '\r') {
-            (void)Serial.read();
-            break;
-          }
-          if (d >= '0' && d <= '9') {
-            digits += (char)Serial.read();
+        for (size_t i = 0; i < line.length(); i++) {
+          const char ch = line[i];
+          if (ch >= '0' && ch <= '9') {
+            digits += ch;
           } else {
-            // Consume unexpected char and stop.
-            (void)Serial.read();
             break;
           }
         }

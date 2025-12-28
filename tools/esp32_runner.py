@@ -37,12 +37,8 @@ except Exception as e:  # pragma: no cover
 
 
 # Keep in sync with the command table printed by the ESP32 firmware.
-# NOTE: We intentionally gate which commands can be sent to avoid accidental
-# destructive actions when iterating.
-#
-# Production sequence is bound to the spacebar (ASCII 0x20). We support it via
-# the explicit `--space` flag (rather than a short `- ` option).
-ALLOWED_CMDS = set("hidbtcpermwvasluP") | {"r", "p", " ", "f", "F", "S"}
+# NOTE: This helper intentionally preserves the left-to-right ordering of
+# command flags (e.g. `-w -R --to-mode2 -p`).
 
 
 def _run(cmd: List[str]) -> None:
@@ -137,6 +133,8 @@ def _send_cmd_and_capture(ser: "serial.Serial", cmd_char: str, quiet_s: float, m
         stop_markers = ["--- END /serial_consumed.bin ---", "Log open FAIL"]
     elif lead == "a":
         stop_markers = ["WiFi mode:", "WiFi AP IP:", "WiFi AP enabled:"]
+    elif lead == "R":
+        stop_markers = ["Pulsing NRST LOW", "Prep OK", "Prep FAIL"]
     elif lead == "S":
         stop_markers = ["Set serial OK:", "Set serial FAIL", "Set serial:"]
     elif lead == " ":
@@ -149,8 +147,8 @@ def _send_cmd_and_capture(ser: "serial.Serial", cmd_char: str, quiet_s: float, m
         stop_markers = ["DP IDCODE:", "DP IDCODE read failed"]
     elif lead == "u":
         stop_markers = ["Upgrade OK", "Upgrade FAIL", "Servomotor upgrade OK"]
-    elif lead == "P":
-        stop_markers = ["Get product info OK", "Get product info FAIL", "GET_PRODUCT_INFO"]
+    elif lead == "p":
+        stop_markers = ["Servomotor GET_PRODUCT_INFO response:", "ERROR: getProductInfo"]
 
     long_running = lead in {"e", "w", "v", " "}
     buf = ""
@@ -201,8 +199,7 @@ def _parse_cmds(argv: List[str]) -> List[str]:
 
         if a.startswith("-") and not a.startswith("--") and len(a) == 2:
             c = a[1]
-            if c in ALLOWED_CMDS:
-                cmds.append(c)
+            cmds.append(c)
 
         i += 1
 

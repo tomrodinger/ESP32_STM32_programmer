@@ -267,7 +267,21 @@ run_step_expect \
   "PRODUCTION sequence SUCCESS" \
   "$PY" "$ROOT_DIR/tools/esp32_runner.py" --skip-build --skip-upload --space --max 240 --quiet 1.0
 
-# 6) WiFi/AP status should include an IP address.
+# 6) Mode 2: RS485 GET_PRODUCT_INFO via 'p'
+# NOTE: Must be after a run/NRST release so the target is out of reset.
+run_step_expect \
+  "cmd_mode2_p" \
+  "Switch to Mode 2 and run the RS485 get product info command ('p')" \
+  "Servomotor GET_PRODUCT_INFO response:" \
+  "$PY" "$ROOT_DIR/tools/esp32_runner.py" --skip-build --skip-upload -2 -p --max 10
+
+# Return to Mode 1 for the remaining Mode-1-only commands.
+run_step \
+  "cmd_mode1" \
+  "Return to Mode 1 (SWD programming mode)" \
+  "$PY" "$ROOT_DIR/tools/esp32_runner.py" --skip-build --skip-upload -1
+
+# 7) WiFi/AP status should include an IP address.
 run_step_expect \
   "cmd_a" \
   "Print WiFi/AP status to Serial (must include IP address)" \
@@ -282,7 +296,7 @@ run_step_expect \
   success_box "cmd_a_ip" "found IP line: $ip_line"
 }
 
-# 7) 'l' should be the last test so it contains meaningful data.
+# 8) 'l' should be the last test so it contains meaningful data.
 run_step_expect \
   "cmd_l" \
   "Print both logs to Serial (tail)" \
