@@ -313,8 +313,10 @@ RecordsSyncResult sync_from_consumed_records() {
     return true;
   };
 
+  uint32_t prev2 = 0;
   uint32_t prev = 0;
   uint32_t last = 0;
+  const bool ok_prev2 = (sz >= 12) ? read_u32_le_at(sz - 12, &prev2) : false;
   const bool ok_prev = read_u32_le_at(sz - 8, &prev);
   const bool ok_last = read_u32_le_at(sz - 4, &last);
   f.close();
@@ -335,6 +337,22 @@ RecordsSyncResult sync_from_consumed_records() {
     res.has_next = true;
     res.next = last;
     set_state(true, last);
+    return res;
+  }
+
+  // Special-case: first consume immediately after USERSET.
+  //
+  // File is append-only and `user_set_serial_next()` seeds the record with:
+  //   0, <seed>
+  // Then the first `consume_for_write()` appends <seed> as the consumed value,
+  // yielding tail:
+  //   0, <seed>, <seed>
+  // In this case, the next serial should be <seed>+1.
+  if (ok_prev2 && prev2 == 0x00000000u && last == prev) {
+    res.sequence_ok = true;
+    res.has_next = true;
+    res.next = last + 1u;
+    set_state(true, last + 1u);
     return res;
   }
 

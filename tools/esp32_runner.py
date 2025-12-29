@@ -68,7 +68,13 @@ def _choose_port(devices: List[dict]) -> str:
         desc = (d.get("description") or "").lower()
         hwid = (d.get("hwid") or "").lower()
         if "usb" in desc or "usb" in hwid or "cdc" in desc or "uart" in desc:
-            return str(port)
+            p = str(port)
+            # On macOS, prefer /dev/tty.* over /dev/cu.*. The /dev/cu.* device can
+            # cause DTR/RTS side effects that reset some ESP32-S3 setups into ROM
+            # download mode.
+            if p.startswith("/dev/cu."):
+                return "/dev/tty." + p[len("/dev/cu.") :]
+            return p
 
     # Fallback: if there is exactly one device, use it.
     if len(devices) == 1 and devices[0].get("port"):
@@ -85,7 +91,16 @@ def _open_serial_with_retry(port: str, baud: int, open_timeout_s: float) -> "ser
     last_err: Optional[Exception] = None
     while time.time() < deadline:
         try:
-            return serial.Serial(port=port, baudrate=baud, timeout=0.05)
+            # Keep the open path minimal; some ESP32-S3 USB-CDC stacks are sensitive
+            # to DTR/RTS manipulation and can reset into ROM download mode.
+            ser = serial.Serial(port=port, baudrate=baud, timeout=0.05)
+            # Best-effort: leave lines deasserted.
+            try:
+                ser.dtr = False
+                ser.rts = False
+            except Exception:
+                pass
+            return ser
         except Exception as e:
             last_err = e
             time.sleep(0.25)
@@ -103,7 +118,75 @@ def _drain_and_print(ser: "serial.Serial", duration_s: float) -> None:
             time.sleep(0.02)
 
 
-def _send_cmd_and_capture(ser: "serial.Serial", cmd_char: str, quiet_s: float, max_s: float) -> None:
+def _drain_capture(ser: "serial.Serial", duration_s: float) -> str:
+    end = time.time() + duration_s
+    out = ""
+    while time.time() < end:
+        data = ser.read(4096)
+        if data:
+            out += data.decode("utf-8", errors="replace")
+        else:
+            time.sleep(0.02)
+    return out
+
+
+def _looks_like_rom_download(s: str) -> bool:
+    ss = s.lower()
+    return ("esp-rom" in ss) or ("waiting for download" in ss) or ("download(usb" in ss)
+
+
+def _looks_like_firmware(s: str) -> bool:
+    # Keep markers fairly loose; banners can vary across builds.
+    return (
+        "ESP32-S3 STM32G0 Programmer" in s
+        or "Mounting SPIFFS" in s
+        or "Filesystem status:" in s
+        or "MODE 2" in s
+    )
+
+
+def _try_reset_sequences(ser: "serial.Serial") -> None:
+    # Try several DTR/RTS combinations. Different boards/USB bridges invert these.
+    # The goal is to get out of ROM download mode and into app.
+    sequences = [
+        # (dtr, rts, pulse_reset)
+        (False, False, True),
+        (True, False, True),
+        (False, True, True),
+        (True, True, True),
+    ]
+
+    for dtr, rts, pulse in sequences:
+        try:
+            ser.dtr = dtr
+            ser.rts = rts
+        except Exception:
+            # If the platform doesn't support toggling, there's nothing else we can do.
+            return
+
+        if pulse:
+            # Pulse RTS as "reset" best-effort (common on ESP auto-reset circuits).
+            try:
+                ser.rts = True
+                time.sleep(0.12)
+                ser.rts = False
+            except Exception:
+                pass
+
+        # Give the target time to reboot.
+        time.sleep(0.25)
+
+        # Drain any boot output so callers can inspect it.
+        s = _drain_capture(ser, duration_s=0.8)
+        if s:
+            _OUT.write(s)
+            _OUT.flush()
+
+        if _looks_like_firmware(s):
+            return
+
+
+def _send_cmd_and_capture(ser: "serial.Serial", cmd_char: str, quiet_s: float, max_s: float, mode: int) -> None:
     # Send the command + newline.
     # Some commands carry an inline argument (e.g. "S1234").
     payload = (cmd_char + "\n").encode("utf-8")
@@ -119,40 +202,56 @@ def _send_cmd_and_capture(ser: "serial.Serial", cmd_char: str, quiet_s: float, m
     # marker or when max_s elapses.
     stop_markers: List[str] = []
     lead = cmd_char[0] if cmd_char else ""
-    if lead == "e":
-        stop_markers = ["Erase OK", "Erase FAIL"]
-    elif lead == "w":
-        stop_markers = ["Write OK", "Write FAIL"]
-    elif lead == "v":
-        stop_markers = ["Verify OK", "Verify FAIL"]
-    elif lead == "s":
-        stop_markers = ["Consume serial OK:", "Consume serial FAIL"]
-    elif lead == "l":
-        # Wait for the full output of both sections.
-        # If we stop at the section header, we can truncate output mid-command.
-        stop_markers = ["--- END /serial_consumed.bin ---", "Log open FAIL"]
-    elif lead == "a":
-        stop_markers = ["WiFi mode:", "WiFi AP IP:", "WiFi AP enabled:"]
-    elif lead == "R":
-        stop_markers = ["Pulsing NRST LOW", "Prep OK", "Prep FAIL"]
-    elif lead == "S":
-        stop_markers = ["Set serial OK:", "Set serial FAIL", "Set serial:"]
-    elif lead == " ":
-        stop_markers = ["PRODUCTION sequence SUCCESS", "Production sequence aborted", "ERROR: Production sequence aborted"]
-    elif lead == "F":
-        stop_markers = ["Firmware file selection OK", "Firmware file selection FAIL"]
-    elif lead == "f":
-        stop_markers = ["Filesystem status:"]
-    elif lead == "i":
-        stop_markers = ["DP IDCODE:", "DP IDCODE read failed"]
-    elif lead == "u":
-        stop_markers = ["Upgrade OK", "Upgrade FAIL", "Servomotor upgrade OK"]
-    elif lead == "p":
-        stop_markers = ["Servomotor GET_PRODUCT_INFO response:", "ERROR: getProductInfo"]
+
+    if mode == 1:
+        if lead == "e":
+            stop_markers = ["Erase OK", "Erase FAIL"]
+        elif lead == "w":
+            stop_markers = ["Write OK", "Write FAIL"]
+        elif lead == "v":
+            stop_markers = ["Verify OK", "Verify FAIL"]
+        elif lead == "s":
+            stop_markers = ["Consume serial OK:", "Consume serial FAIL"]
+        elif lead == "l":
+            # Wait for the full output of both sections.
+            # If we stop at the section header, we can truncate output mid-command.
+            stop_markers = ["--- END /serial_consumed.bin ---", "Log open FAIL"]
+        elif lead == "a":
+            stop_markers = ["WiFi mode:", "WiFi AP IP:", "WiFi AP enabled:"]
+        elif lead == "R":
+            stop_markers = ["Pulsing NRST LOW", "Prep OK", "Prep FAIL"]
+        elif lead == "S":
+            stop_markers = ["Set serial OK:", "Set serial FAIL", "Set serial:"]
+        elif lead == " ":
+            stop_markers = ["PRODUCTION sequence SUCCESS", "Production sequence aborted", "ERROR: Production sequence aborted"]
+        elif lead == "F":
+            stop_markers = ["Firmware file selection OK", "Firmware file selection FAIL"]
+        elif lead == "f":
+            stop_markers = ["Filesystem status:"]
+        elif lead == "i":
+            stop_markers = ["DP IDCODE:", "DP IDCODE read failed"]
+        elif lead == "u":
+            stop_markers = ["Upgrade OK", "Upgrade FAIL", "Servomotor upgrade OK"]
+        elif lead == "p":
+            stop_markers = ["Servomotor GET_PRODUCT_INFO response:", "ERROR: getProductInfo"]
+    else:
+        # Mode 2 (RS485 testing)
+        if lead == "p":
+            stop_markers = ["Servomotor GET_COMPREHENSIVE_POSITION response", "ERROR: getComprehensivePosition"]
+        elif lead == "i":
+            stop_markers = ["Servomotor GET_PRODUCT_INFO response:", "ERROR: getProductInfo"]
+        elif lead == "e":
+            stop_markers = ["[Motor] enableMosfets called.", "ERROR: enableMosfets"]
+        elif lead == "d":
+            stop_markers = ["[Motor] disableMosfets called.", "ERROR: disableMosfets"]
+        elif lead == "t":
+            stop_markers = ["[Motor] trapezoidMove", "ERROR: trapezoidMove"]
+        elif lead == "R":
+            stop_markers = ["[Motor] systemReset called.", "ERROR: systemReset"]
 
     # Firmware upgrade is also long-running and can have multi-second stretches
     # without output (device flash write), so do not apply quiet-time early exit.
-    long_running = lead in {"e", "w", "v", " ", "u"}
+    long_running = lead in {"e", "w", "v", " ", "u"} if mode == 1 else lead in {"u", "p", "i", "e", "d", "t", "R"}
     buf = ""
     while True:
         data = ser.read(4096)
@@ -176,7 +275,7 @@ def _send_cmd_and_capture(ser: "serial.Serial", cmd_char: str, quiet_s: float, m
             break
 
 
-def _parse_cmds(argv: List[str]) -> List[str]:
+def _parse_cmds(argv: List[str], ignore_indices: "set[int]") -> List[str]:
     """Extract ordered command characters from argv.
 
     Preserves ordering (left-to-right) to match how a human would type sequences.
@@ -185,6 +284,9 @@ def _parse_cmds(argv: List[str]) -> List[str]:
     cmds: List[str] = []
     i = 0
     while i < len(argv):
+        if i in ignore_indices:
+            i += 1
+            continue
         a = argv[i]
         if a == "--space":
             cmds.append(" ")
@@ -200,8 +302,19 @@ def _parse_cmds(argv: List[str]) -> List[str]:
             continue
 
         if a.startswith("-") and not a.startswith("--") and len(a) == 2:
+            # Backwards-compatible: -i -r etc.
             c = a[1]
             cmds.append(c)
+            i += 1
+            continue
+
+        # New: allow raw command tokens too, e.g. "2" "p" "R" "e".
+        # Accept single-char commands. Also accept "S123" style commands.
+        if not a.startswith("-") and a:
+            if len(a) == 1 or (len(a) >= 2 and a[0] == "S" and a[1:].isdigit()):
+                cmds.append(a)
+                i += 1
+                continue
 
         i += 1
 
@@ -231,7 +344,7 @@ def _parse_args(argv: List[str]) -> Args:
     skip_upload = False
     log_path = "tools/esp32_runner_last.log"
     open_timeout_s = 15.0
-    boot_wait_s = 2.0
+    boot_wait_s = 4.0
     quiet_s = 0.6
     max_per_cmd_s = 6.0
 
@@ -297,7 +410,21 @@ def _parse_args(argv: List[str]) -> Args:
             raise SystemExit(0)
         i += 1
 
-    cmds = _parse_cmds(argv)
+    ignore: set[int] = set()
+
+    # Mark option value indices so they won't be mis-parsed as raw command tokens.
+    # (e.g. `--boot-wait 5` should not send the command "5").
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in {"--port", "--baud", "--log", "--open-timeout", "--boot-wait", "--quiet", "--max", "--set-serial"}:
+            if i + 1 < len(argv):
+                ignore.add(i + 1)
+            i += 2
+            continue
+        i += 1
+
+    cmds = _parse_cmds(argv, ignore)
     return Args(
         port=port,
         baud=baud,
@@ -366,12 +493,25 @@ def main() -> int:
     try:
         # Give USB-CDC and firmware some time to settle.
         time.sleep(args.boot_wait_s)
-        _drain_and_print(ser, duration_s=0.5)
+        boot_text = _drain_capture(ser, duration_s=0.7)
+        if boot_text:
+            _OUT.write(boot_text)
+            _OUT.flush()
 
+        if _looks_like_rom_download(boot_text) and not _looks_like_firmware(boot_text):
+            _OUT.write("[warn] Detected ROM download mode on serial open; attempting reset sequences...\n")
+            _OUT.flush()
+            _try_reset_sequences(ser)
+
+        mode = 1
         for c in args.cmds:
             _OUT.write(f"\n[send] {c}\n")
             _OUT.flush()
-            _send_cmd_and_capture(ser, cmd_char=c, quiet_s=args.quiet_s, max_s=args.max_per_cmd_s)
+            if c == "1":
+                mode = 1
+            elif c == "2":
+                mode = 2
+            _send_cmd_and_capture(ser, cmd_char=c, quiet_s=args.quiet_s, max_s=args.max_per_cmd_s, mode=mode)
 
         return 0
     finally:

@@ -29,8 +29,12 @@ static void print_help() {
   LOG().println("  h = help");
   LOG().println("  1 = switch to Mode 1 (SWD Programming)");
   LOG().println("  2 = stay in Mode 2 (this mode)");
-  LOG().println("  t = test (prints 'Testing... test done!')");
-  LOG().println("  p = get product info (RS485)");
+  LOG().println("  R = system reset (motor -> bootloader)");
+  LOG().println("  e = enable MOSFETs");
+  LOG().println("  d = disable MOSFETs");
+  LOG().println("  t = trapezoid move (1 rotation for 1 second)");
+  LOG().println("  p = get comprehensive position (prints read-back values)");
+  LOG().println("  i = get product info (RS485)");
   LOG().println("  u = upgrade firmware over RS485 (unique ID addressing)");
 }
 
@@ -67,6 +71,60 @@ static void cmd_print_product_info(Servomotor &motor) {
   LOG().printf("  uniqueId: 0x%08lX%08lX\n", (unsigned long)(r.uniqueId >> 32),
                (unsigned long)(r.uniqueId & 0xFFFFFFFFu));
   LOG().printf("  reserved: 0x%08lX\n", (unsigned long)r.reserved);
+}
+
+static void print_motor_call_error(const char *op, const Servomotor &motor) {
+  const int err = motor.getError();
+  if (err == 0) {
+    return;
+  }
+  if (err == COMMUNICATION_ERROR_TIMEOUT) {
+    LOG().printf("ERROR: %s timed out\n", op);
+  } else {
+    LOG().printf("ERROR: %s failed errno=%d\n", op, err);
+  }
+}
+
+static void cmd_system_reset(Servomotor &motor) {
+  motor.systemReset();
+  print_motor_call_error("systemReset", motor);
+}
+
+static void cmd_enable_mosfets(Servomotor &motor) {
+  motor.enableMosfets();
+  print_motor_call_error("enableMosfets", motor);
+}
+
+static void cmd_disable_mosfets(Servomotor &motor) {
+  motor.disableMosfets();
+  print_motor_call_error("disableMosfets", motor);
+}
+
+static void cmd_trapezoid_move_1_rotation_1_second(Servomotor &motor) {
+  // Default unit settings for the vendored library are:
+  // - position: SHAFT_ROTATIONS
+  // - time: SECONDS
+  // so these are expressed as 1 rotation over 1 second.
+  motor.trapezoidMove(1.0f, 1.0f);
+  print_motor_call_error("trapezoidMove", motor);
+}
+
+static void cmd_get_comprehensive_position(Servomotor &motor) {
+  const getComprehensivePositionResponse r = motor.getComprehensivePositionRaw();
+  const int err = motor.getError();
+  if (err != 0) {
+    if (err == COMMUNICATION_ERROR_TIMEOUT) {
+      LOG().println("ERROR: getComprehensivePosition timed out");
+    } else {
+      LOG().printf("ERROR: getComprehensivePosition failed errno=%d\n", err);
+    }
+    return;
+  }
+
+  LOG().println("Servomotor GET_COMPREHENSIVE_POSITION response (raw):");
+  LOG().printf("  commandedPosition: %lld\n", (long long)r.commandedPosition);
+  LOG().printf("  hallSensorPosition: %lld\n", (long long)r.hallSensorPosition);
+  LOG().printf("  externalEncoderPosition: %ld\n", (long)r.externalEncoderPosition);
 }
 
 namespace mode2_loop {
@@ -119,11 +177,27 @@ void run() {
         LOG().println("Already in Mode 2 (RS485 Testing)");
         break;
 
+      case 'R':
+        cmd_system_reset(motor);
+        break;
+
+      case 'e':
+        cmd_enable_mosfets(motor);
+        break;
+
+      case 'd':
+        cmd_disable_mosfets(motor);
+        break;
+
       case 't':
-        LOG().println("Testing... test done!");
+        cmd_trapezoid_move_1_rotation_1_second(motor);
         break;
 
       case 'p':
+        cmd_get_comprehensive_position(motor);
+        break;
+
+      case 'i':
         cmd_print_product_info(motor);
         break;
 

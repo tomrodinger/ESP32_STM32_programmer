@@ -26,9 +26,12 @@ The `P` command (servomotor get product info) will be removed.
 
 **Mode 2** - RS485 Testing Mode:
 - Separate event loop in a new source file
-- Starts with minimal commands: `h`, `1`, `2`, `t`
-- `t` prints `Testing... test done!` (placeholder for future RS485 test commands)
-- The `P` command and related code will be moved here in a future iteration
+- Commands include basic RS485 motor operations:
+  - `R` = motor system reset (enter bootloader)
+  - `e` / `d` = enable/disable MOSFETs
+  - `t` = trapezoid move (1 rotation for 1 second)
+  - `p` = get comprehensive position (prints read-back values)
+  - `i` = get product info
 
 ### Mode Switching
 
@@ -51,8 +54,10 @@ The `P` command (servomotor get product info) will be removed.
 | `1` | Stay in Mode 1 (print banner) | Switch to Mode 1 |
 | `2` | Switch to Mode 2 | Stay in Mode 2 (print banner) |
 | `h` | Print Mode 1 help | Print Mode 2 help |
-| `t` | Dump RAM terminal buffer | Print "Testing... test done!" |
+| `t` | Dump RAM terminal buffer | Trapezoid move (1 rotation for 1 second) |
 | `f,F,i,s,S,l,R,m,d,b,c,p,r,e,w,v,a,<space>` | Available | Not available |
+
+Mode 2 now uses `p` for comprehensive position and `i` for product info.
 
 ---
 

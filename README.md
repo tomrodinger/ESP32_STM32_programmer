@@ -136,7 +136,12 @@ Mode 2 commands (for now):
 
 - `h` / `?` = help
 - `1` / `2` = mode switching
-- `t` = prints `Testing... test done!`
+- `R` = motor system reset (enter bootloader)
+- `e` / `d` = enable/disable MOSFETs
+- `t` = trapezoid move (1 rotation for 1 second)
+- `p` = get comprehensive position (prints read-back values)
+- `i` = get product info (RS485)
+- `u` = upgrade firmware over RS485 (unique ID addressing)
 
 ### Test runner output
 
