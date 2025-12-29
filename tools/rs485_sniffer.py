@@ -75,6 +75,11 @@ def main() -> int:
     print(f"Sniffing {args.port} @ {args.baud} baud. Ctrl-C to stop.")
     total = 0
 
+    # Write space-separated timing data for offline analysis.
+    data_path = "sniffer_timing_data.txt"
+    data_f = open(data_path, "w", encoding="utf-8")
+    data_f.write("time_since_start_of_packet_ms gap_ms max_gap_ms byte\n")
+
     # Packet-relative timing state:
     packet_t0: float | None = None
     last_byte_t: float | None = None
@@ -89,11 +94,13 @@ def main() -> int:
                 continue
 
             t = now_s()
+            reset_packet = False
             if last_byte_t is None:
                 # First byte ever observed.
                 packet_t0 = t
                 max_gap_s = 0.0
                 gap_s = 0.0
+                reset_packet = True
             else:
                 gap_s = t - last_byte_t
                 if gap_s > max_gap_s:
@@ -102,6 +109,7 @@ def main() -> int:
                     # Consider this a new packet: reset origin and max-gap stat.
                     packet_t0 = t
                     max_gap_s = 0.0
+                    reset_packet = True
 
             last_byte_t = t
             assert packet_t0 is not None
@@ -109,13 +117,30 @@ def main() -> int:
             gap_ms = gap_s * 1000.0
             max_gap_ms = max_gap_s * 1000.0
 
+            # If this byte started a new packet, force the reported gap to 0.
+            if reset_packet:
+                gap_ms = 0.0
+
             total += 1
-            sys.stdout.write(f"{rel_ms:9.3f} ms  gap={gap_ms:8.3f} ms  max_gap={max_gap_ms:8.3f} ms  {b[0]:02X}\n")
+            sys.stdout.write(
+                f"{rel_ms:9.3f} ms  gap={gap_ms:8.3f} ms  max_gap={max_gap_ms:8.3f} ms  {b[0]:02X}\n"
+            )
             sys.stdout.flush()
+
+            # Also write a simple space-separated row for plotting.
+            data_f.write(f"{rel_ms:.3f} {gap_ms:.3f} {max_gap_ms:.3f} {b[0]:02X}\n")
+            # Keep file reasonably up-to-date if user kills the program.
+            if (total % 256) == 0:
+                data_f.flush()
     except KeyboardInterrupt:
         # Allow Ctrl-C to stop without a noisy traceback.
         try:
             ser.close()
+        except Exception:
+            pass
+        try:
+            data_f.flush()
+            data_f.close()
         except Exception:
             pass
 
