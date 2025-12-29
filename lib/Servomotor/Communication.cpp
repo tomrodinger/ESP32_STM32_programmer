@@ -2,11 +2,6 @@
 #include "Communication.h"
 #include <limits>  // For std::numeric_limits
 
-#ifndef ARDUINO
-#include <chrono>
-#include <thread>
-#endif
-
 //#define VERBOSE
 #define TIMEOUT_MS 1000  // Define timeout duration (1 second)
 
@@ -17,73 +12,20 @@
 
 #define CRC32_POLYNOMIAL 0xEDB88320
 
-// ----------------------------------------------------------------------------
-// TX pacing (debug/compatibility)
-//
-// The known-good host upgrader (`upgrade_firmware.py`) transmits large packets
-// in chunks with delays to avoid overflowing buffers on the target or the
-// transport.
-//
-// This library historically wrote large payloads in a single Serial.write()
-// call; if the link/target drops bytes, the device won't ACK.
-//
-// These knobs implement similar pacing for large writes.
-// ----------------------------------------------------------------------------
-#ifndef COMMUNICATION_PACE_THRESHOLD
-#define COMMUNICATION_PACE_THRESHOLD 50
-#endif
-
-#ifndef COMMUNICATION_PACE_CHUNK_SIZE
-// Split large writes into multiple Serial.write() calls, but do **not** add
-// inter-chunk sleeps.
-//
-// Rationale: the target UART receive timeout is configured to ~0.1s in
-// [`RS485.c`](../../Servomotor/common_source_files/RS485.c:159) via `USART1->RTOR`
-// at [`RS485.c`](../../Servomotor/common_source_files/RS485.c:162). Any long gap
-// between bytes can cause the target to reset its receive state and drop the
-// packet (no ACK).
-//
-// Smaller chunks can still help with intermediate buffering (USB/UART driver)
-// without introducing intentional gaps.
-#define COMMUNICATION_PACE_CHUNK_SIZE 256
-#endif
-
-#ifndef COMMUNICATION_PACE_DELAY_MS
-// Intentionally 0: no added delay between chunks.
-#define COMMUNICATION_PACE_DELAY_MS 0
-#endif
-
-static inline void comm_delay_ms(uint32_t ms)
-{
-#ifdef ARDUINO
-    delay(ms);
-#else
-    std::this_thread::sleep_for(std::chrono::milliseconds(ms));
-#endif
-}
-
 static uint32_t crc32_value;
 static bool s_commSerialOpened = false;
 
-// -----------------------------------------------------------------------------
-// CRC32 implementation
-//
-// The original implementation used a bit-at-a-time CRC update (8 iterations per
-// byte), which can be slow on microcontrollers and, critically, can create a
-// long on-wire gap if CRC is computed *after* sending the payload and *before*
-// sending the trailing CRC32.
-//
-// This table-driven implementation keeps the same polynomial/initialization and
-// therefore remains wire-compatible, but is much faster (one table lookup per
-// byte).
-//
-// Polynomial is the reflected CRC-32 (IEEE) polynomial used by the prior code:
-// 0xEDB88320.
-// -----------------------------------------------------------------------------
+// If you want to potentially sppeed up CRC32 calculations, enable the table-based implementation by uncommenting out the line below.
+// If you are on an ESP32-based board, the table-based implementation may be significantly faster and the extra memory used (1KB) may be worth it.
+//#define TABLE_BASED_CRC32
+#ifdef TABLE_BASED_CRC32
+// Faster CRC32: table-driven implementation (same reflected polynomial as before).
+// This replaces the bit-at-a-time loop (8 iterations per byte) with one lookup
+// per byte.
 static uint32_t s_crc32_table[256];
 static bool s_crc32_table_ready = false;
 
-static void crc32_table_init()
+static void crc32_table_init(void)
 {
     if (s_crc32_table_ready) {
         return;
@@ -102,54 +44,6 @@ static void crc32_table_init()
     s_crc32_table_ready = true;
 }
 
-// Debug helpers: hex-dump bytes to Serial.
-// These are used by the optional TX/RX dumps.
-static void print_hex_byte(uint8_t b)
-{
-    Serial.print("0x");
-    if (b < 0x10) {
-        Serial.print("0");
-    }
-    Serial.print(b, HEX);
-}
-
-static void dump_hex_bytes_with_wrap(uint32_t &pos, const uint8_t *data, size_t len, uint8_t wrap = 16)
-{
-    for (size_t i = 0; i < len; i++) {
-        print_hex_byte(data[i]);
-        Serial.print(" ");
-        pos++;
-        if (wrap != 0 && (pos % wrap) == 0) {
-            Serial.println();
-        }
-    }
-}
-
-static void dump_hex_byte_with_wrap(uint32_t &pos, uint8_t b, uint8_t wrap = 16)
-{
-    print_hex_byte(b);
-    Serial.print(" ");
-    pos++;
-    if (wrap != 0 && (pos % wrap) == 0) {
-        Serial.println();
-    }
-}
-
-// Enable/disable RX dumping here.
-// If your build already defines VERBOSE, you can keep this on; it is intentionally very noisy.
-#ifndef COMMUNICATION_DUMP_RX
-#define COMMUNICATION_DUMP_RX 1
-#endif
-
-// Enable/disable TX dumping here.
-// IMPORTANT: dumping TX bytes during a large packet can *block* on USB Serial
-// and introduce large on-wire gaps (e.g. right before the CRC32 trailer),
-// which can trip the target's UART RX timeout and make it drop the packet.
-// Keep this OFF during real firmware upgrades.
-#ifndef COMMUNICATION_DUMP_TX
-#define COMMUNICATION_DUMP_TX 0
-#endif
-
 void crc32_init(void)
 {
     crc32_table_init();
@@ -165,6 +59,31 @@ uint32_t calculate_crc32_buffer_without_reinit(const void* data, size_t length)
     }
     return ~crc32_value;
 }
+
+#else
+
+void crc32_init(void)
+{
+    crc32_value = 0xFFFFFFFF;
+}
+
+uint32_t calculate_crc32_buffer_without_reinit(const void* data, size_t length)
+{
+    uint32_t i, j;
+    uint8_t *d = (uint8_t *)data;
+    for (i = 0; i < length; i++) {
+        crc32_value ^= d[i];
+        for (j = 0; j < 8; j++) {
+            if (crc32_value & 1)
+                crc32_value = (crc32_value >> 1) ^ CRC32_POLYNOMIAL;
+            else
+                crc32_value = crc32_value >> 1;
+        }
+    }
+    return ~crc32_value;
+}
+
+#endif
 
 uint32_t calculate_crc32(const uint8_t* data, size_t length)
 {
@@ -220,39 +139,6 @@ void Communication::sendCommandCore(bool isExtendedAddress, uint64_t addressValu
     uint8_t sizeByte;
     bool isExtendedSize = false;
     uint16_t size16Bit;
-
-    // TX dumping is optional and OFF by default to avoid changing on-wire timing.
-    #if COMMUNICATION_DUMP_TX
-    uint32_t tx_pos = 0;
-    Serial.println("TX bytes (each _serial.write in order):");
-    #define TX_DUMP_BYTE(b) do { dump_hex_byte_with_wrap(tx_pos, (uint8_t)(b)); } while (0)
-    #define TX_DUMP_BUF(ptr, len) do { dump_hex_bytes_with_wrap(tx_pos, (const uint8_t *)(ptr), (len)); } while (0)
-    #else
-    #define TX_DUMP_BYTE(b) do { } while (0)
-    #define TX_DUMP_BUF(ptr, len) do { } while (0)
-    #endif
-
-    #define TX_WRITE_BYTE(b) do { _serial.write((uint8_t)(b)); TX_DUMP_BYTE((uint8_t)(b)); } while (0)
-
-    // Pacing for larger buffers: write in chunks with delays.
-    const auto write_buf_paced = [&](const uint8_t *ptr, size_t len) {
-        if (!ptr || len == 0) return;
-        if (len <= (size_t)COMMUNICATION_PACE_THRESHOLD) {
-            _serial.write(ptr, len);
-            return;
-        }
-
-        for (size_t off = 0; off < len; off += (size_t)COMMUNICATION_PACE_CHUNK_SIZE) {
-            const size_t take = ((len - off) > (size_t)COMMUNICATION_PACE_CHUNK_SIZE) ? (size_t)COMMUNICATION_PACE_CHUNK_SIZE : (len - off);
-            _serial.write(ptr + off, take);
-            // No intentional delay here (see COMMUNICATION_PACE_DELAY_MS comment).
-            if (COMMUNICATION_PACE_DELAY_MS > 0 && (off + take) < len) {
-                comm_delay_ms((uint32_t)COMMUNICATION_PACE_DELAY_MS);
-            }
-        }
-    };
-
-    #define TX_WRITE_BUF(ptr, len) do { write_buf_paced((const uint8_t *)(ptr), (len)); TX_DUMP_BUF((const uint8_t *)(ptr), (len)); } while (0)
     // Calculate address size
     const uint16_t addressSize = isExtendedAddress ? (sizeof(uint8_t) + sizeof(uint64_t)) : sizeof(uint8_t); // Extended: 1 byte flag + 8 bytes ID, Standard: 1 byte alias
     
@@ -262,9 +148,10 @@ void Communication::sendCommandCore(bool isExtendedAddress, uint64_t addressValu
         totalPacketSize += sizeof(uint32_t); // Add 4 bytes for CRC32
     }
     
-    // Determine size bytes WITHOUT transmitting yet.
+    // Determine the size byte value
     if (totalPacketSize <= DECODED_FIRST_BYTE_EXTENDED_SIZE) {
         sizeByte = encodeFirstByte(totalPacketSize);
+        _serial.write(sizeByte);
     } else {
         isExtendedSize = true;
         sizeByte = encodeFirstByte(DECODED_FIRST_BYTE_EXTENDED_SIZE);
@@ -276,50 +163,41 @@ void Communication::sendCommandCore(bool isExtendedAddress, uint64_t addressValu
             return;
         }
         size16Bit = (uint16_t)totalPacketSize;
+        _serial.write(sizeByte);
+        _serial.write((uint8_t *)&size16Bit, sizeof(size16Bit));
     }
-
-    // Precompute CRC BEFORE any TX so there is no gap before the CRC trailer.
-    uint32_t crc = 0;
+    
+    // Initialize CRC calculation if enabled
     if (_crc32Enabled) {
         crc32_init();
         calculate_crc32_buffer_without_reinit(&sizeByte, sizeof(sizeByte));
         if (isExtendedSize) {
             calculate_crc32_buffer_without_reinit(&size16Bit, sizeof(size16Bit));
         }
-        if (isExtendedAddress) {
-            const uint8_t extendedAddrByte = EXTENDED_ADDRESSING;
-            calculate_crc32_buffer_without_reinit(&extendedAddrByte, sizeof(extendedAddrByte));
-            calculate_crc32_buffer_without_reinit(&addressValue, sizeof(addressValue));
-        } else {
-            const uint8_t alias = (uint8_t)addressValue;
-            calculate_crc32_buffer_without_reinit(&alias, sizeof(alias));
-        }
-        calculate_crc32_buffer_without_reinit(&commandID, sizeof(commandID));
-        if (payload != nullptr && payloadSize > 0) {
-            calculate_crc32_buffer_without_reinit(payload, payloadSize);
-        }
-        crc = get_crc32();
-    }
-
-    // Now transmit bytes back-to-back.
-    TX_WRITE_BYTE(sizeByte);
-    if (isExtendedSize) {
-        TX_WRITE_BUF((uint8_t *)&size16Bit, sizeof(size16Bit));
     }
     
     // Write address bytes
     if (isExtendedAddress) {
         const uint8_t extendedAddrByte = EXTENDED_ADDRESSING;
-        TX_WRITE_BYTE(extendedAddrByte);
-        TX_WRITE_BUF((uint8_t *)&addressValue, sizeof(addressValue));
+        _serial.write(extendedAddrByte);
+        _serial.write((uint8_t *)&addressValue, sizeof(addressValue));
+        if (_crc32Enabled) {
+            calculate_crc32_buffer_without_reinit(&extendedAddrByte, sizeof(extendedAddrByte));
+            calculate_crc32_buffer_without_reinit(&addressValue, sizeof(addressValue));        
+        }
     }
     else {
         const uint8_t alias = (uint8_t)addressValue;
-        TX_WRITE_BYTE(alias);
+        _serial.write(alias);
+        
+        // Add to CRC if enabled
+        if (_crc32Enabled) {
+            calculate_crc32_buffer_without_reinit(&alias, sizeof(alias));
+        }
     }
     
     // Write command byte
-    TX_WRITE_BYTE(commandID);
+    _serial.write(commandID);
     
     #ifdef VERBOSE
     if (isExtendedAddress) {
@@ -339,11 +217,32 @@ void Communication::sendCommandCore(bool isExtendedAddress, uint64_t addressValu
     }
     #endif
 
-    // CRC already computed above.
+    // Add command to CRC if enabled
+    if (_crc32Enabled) {
+        calculate_crc32_buffer_without_reinit(&commandID, sizeof(commandID));
+    }
     
     // Write payload
     if (payload != nullptr && payloadSize > 0) {
-        TX_WRITE_BUF(payload, payloadSize);
+        _serial.write(payload, payloadSize);
+        
+        // Add payload to CRC if enabled
+        if (_crc32Enabled) {
+            calculate_crc32_buffer_without_reinit(payload, payloadSize);
+        }
+        
+        #ifdef VERBOSE
+        Serial.print("Payload bytes");
+        if (isExtendedAddress) Serial.print(" (extended address)");
+        Serial.print(": ");
+        for (uint16_t i = 0; i < payloadSize; i++) {
+            Serial.print("0x");
+            if (payload[i] < 0x10) Serial.print("0");
+            Serial.print(payload[i], HEX);
+            Serial.print(" ");
+        }
+        Serial.println();
+        #endif
     }
     else {
         #ifdef VERBOSE
@@ -355,20 +254,18 @@ void Communication::sendCommandCore(bool isExtendedAddress, uint64_t addressValu
     
     // Calculate and write CRC32 if enabled
     if (_crc32Enabled) {
-        TX_WRITE_BUF((uint8_t*)(&crc), sizeof(crc));
-    }
-
-    #if COMMUNICATION_DUMP_TX
-    if ((tx_pos % 16) != 0) {
+        // Get final CRC and write it
+        uint32_t crc = get_crc32();
+        _serial.write((uint8_t*)(&crc), sizeof(crc));
+        
+        #ifdef VERBOSE
+        Serial.print("calculated CRC32 bytes sent");
+        if (isExtendedAddress) Serial.print(" (extended)");
+        Serial.print(": 0x");
+        Serial.print(crc, HEX);
         Serial.println();
+        #endif
     }
-    Serial.println("TX end");
-    #endif
-
-    #undef TX_DUMP_BYTE
-    #undef TX_DUMP_BUF
-    #undef TX_WRITE_BYTE
-    #undef TX_WRITE_BUF
 }
 
 int16_t Communication::getResponse(uint8_t* buffer, uint16_t bufferSize, uint16_t& receivedSize) {
@@ -736,31 +633,12 @@ int8_t Communication::receiveBytes(void* buffer, uint16_t bufferSize, int32_t nu
 
     bool bufferTooSmall = (buffer != nullptr && bufferSize < numBytes);
 
-    #if COMMUNICATION_DUMP_RX
-    static uint32_t rx_pos = 0;
-    Serial.print("RX receiveBytes(): want=");
-    Serial.print(numBytes);
-    Serial.print(" timeout_ms=");
-    Serial.print(timeout_ms);
-    Serial.print(" bufferSize=");
-    Serial.print(bufferSize);
-    Serial.print(" store=");
-    Serial.println((buffer != nullptr && !bufferTooSmall) ? "yes" : "no");
-    #endif
-
     // Wait for all bytes to arrive
     uint32_t startTime = millis();
     while (_serial.available() < numBytes) {
         if (millis() - startTime > timeout_ms) {
-            #if COMMUNICATION_DUMP_RX
-            Serial.print("RX timeout waiting for ");
-            Serial.print(numBytes);
-            Serial.print(" bytes. available=");
-            Serial.print(_serial.available());
-            Serial.print(" elapsed_ms=");
-            Serial.print(millis() - startTime);
-            Serial.print(" timeout_ms=");
-            Serial.println(timeout_ms);
+            #ifdef VERBOSE
+            Serial.println("A timeout error occured while receiving");
             #endif
             return COMMUNICATION_ERROR_TIMEOUT;
         }
@@ -769,22 +647,10 @@ int8_t Communication::receiveBytes(void* buffer, uint16_t bufferSize, int32_t nu
     // Read all bytes (store in buffer if adequate, otherwise discard)
     for (uint16_t i = 0; i < numBytes; i++) {
         uint8_t byte = _serial.read();
-
-        #if COMMUNICATION_DUMP_RX
-        dump_hex_byte_with_wrap(rx_pos, byte);
-        #endif
-
         if (buffer != nullptr && !bufferTooSmall) {
             ((char*)buffer)[i] = byte;
         }
     }
-
-    #if COMMUNICATION_DUMP_RX
-    if ((rx_pos % 16) != 0) {
-        Serial.println();
-    }
-    Serial.println("RX end");
-    #endif
 
     if(bufferTooSmall) {
         #ifdef VERBOSE
