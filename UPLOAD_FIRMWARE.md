@@ -108,9 +108,9 @@ Host upgrader resets into bootloader then waits 70ms:
 
 ESP32 flow (current jig behavior):
 
-- The Mode 2 `u` command does **not** send any reset commands.
-- The operator must ensure the target is already in the bootloader (for example: run Mode 1 `R`, then press `2` to enter Mode 2).
-- Then `u` begins sending firmware pages immediately.
+- The Mode 2 `u` command sends a **software** [`cpp.Servomotor::systemReset()`](lib/Servomotor/Servomotor.h:479) before starting the page loop.
+- It then waits **70ms** (matching [`WAIT_FOR_RESET_TIME`](../../Servomotor/python_programs/upgrade_firmware.py:68)).
+- After all pages have been ACKed, the jig waits **100ms**, then sends another software reset (to boot into the new firmware) and waits **1s** to allow the bootloader to time out and start the application.
 
 ## ACK / error handling
 
@@ -209,7 +209,7 @@ The Arduino library currently writes payloads in a single call inside [`cpp.Comm
 ### Constraints / decisions made
 
 - The vendored Arduino library under [`lib/Servomotor/`](lib/Servomotor/:1) must not be modified without explicit approval.
-- `u` was changed to **not** send RS485 `SYSTEM_RESET` before/after the upgrade; the operator is expected to place the target into bootloader mode separately.
+- `u` sends RS485 `SYSTEM_RESET` before and after the upgrade, matching the host upgrader flow.
 
 ### Recommended next debug steps (for next AI)
 

@@ -150,7 +150,9 @@ def _send_cmd_and_capture(ser: "serial.Serial", cmd_char: str, quiet_s: float, m
     elif lead == "p":
         stop_markers = ["Servomotor GET_PRODUCT_INFO response:", "ERROR: getProductInfo"]
 
-    long_running = lead in {"e", "w", "v", " "}
+    # Firmware upgrade is also long-running and can have multi-second stretches
+    # without output (device flash write), so do not apply quiet-time early exit.
+    long_running = lead in {"e", "w", "v", " ", "u"}
     buf = ""
     while True:
         data = ser.read(4096)

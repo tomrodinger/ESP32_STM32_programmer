@@ -23,6 +23,17 @@ static constexpr size_t k_model_code_len = 8;
 static constexpr uint8_t k_first_firmware_page_number = 5;
 static constexpr uint8_t k_last_firmware_page_number = 30;
 
+// Match the known-good host upgrader timing in
+// [`upgrade_firmware.py`](../../Servomotor/python_programs/upgrade_firmware.py:68).
+// WAIT_FOR_RESET_TIME = 0.07 seconds (70ms).
+static constexpr uint32_t k_wait_after_pre_reset_ms = 70;
+
+// Local jig behavior: after the last page is sent+ACKed, wait a bit before the
+// post-reset, then after the post-reset wait long enough for the bootloader to
+// time out and run the application.
+static constexpr uint32_t k_wait_before_post_reset_ms = 100;
+static constexpr uint32_t k_wait_after_post_reset_ms = 1000;
+
 static bool read_all(File &f, uint8_t *dst, size_t n) {
   if (!dst && n) return false;
   size_t got = 0;
@@ -151,8 +162,22 @@ bool upgrade_main_firmware_by_unique_id(Servomotor &motor, uint64_t unique_id, c
   // vendored Arduino library.
   static constexpr uint32_t k_inter_page_delay_ms = 0;
 
-  // NOTE: Per project direction, the Mode 2 'u' command does not send any reset.
-  // The operator must ensure the target is already in the bootloader before calling this.
+  // Reset into bootloader, mirroring the host upgrader flow.
+  // Note: this is a *software* reset over RS485, not a hardware NRST toggle.
+  Serial.println("Servomotor upgrade: pre-reset (SYSTEM_RESET) ...");
+  motor.systemReset();
+  {
+    const int err = motor.getError();
+    if (err != 0) {
+      if (err == COMMUNICATION_ERROR_TIMEOUT) {
+        Serial.println("ERROR: SYSTEM_RESET timed out (no ACK)");
+      } else {
+        Serial.printf("ERROR: SYSTEM_RESET failed errno=%d\n", err);
+      }
+      return false;
+    }
+  }
+  delay(k_wait_after_pre_reset_ms);
 
   // Send pages and require ACK for each firmwareUpgrade.
   uint8_t page[2058];
@@ -193,6 +218,24 @@ bool upgrade_main_firmware_by_unique_id(Servomotor &motor, uint64_t unique_id, c
 
     if (k_inter_page_delay_ms) delay(k_inter_page_delay_ms);
   }
+
+  delay(k_wait_before_post_reset_ms);
+
+  // Post-reset to start the new firmware (mirrors host upgrader).
+  Serial.println("Servomotor upgrade: post-reset (SYSTEM_RESET) ...");
+  motor.systemReset();
+  {
+    const int err = motor.getError();
+    if (err != 0) {
+      if (err == COMMUNICATION_ERROR_TIMEOUT) {
+        Serial.println("ERROR: post SYSTEM_RESET timed out (no ACK)");
+      } else {
+        Serial.printf("ERROR: post SYSTEM_RESET failed errno=%d\n", err);
+      }
+      return false;
+    }
+  }
+  delay(k_wait_after_post_reset_ms);
 
   Serial.println("Servomotor upgrade OK");
   return true;

@@ -275,6 +275,13 @@ run_step_expect \
   "Servomotor GET_PRODUCT_INFO response:" \
   "$PY" "$ROOT_DIR/tools/esp32_runner.py" --skip-build --skip-upload -2 -p --max 10
 
+# 6b) Mode 2: RS485 firmware upgrade via 'u'
+run_step_expect \
+  "cmd_mode2_u" \
+  "Run the RS485 firmware upgrade command ('u') and confirm completion" \
+  "Servomotor upgrade OK" \
+  "$PY" "$ROOT_DIR/tools/esp32_runner.py" --skip-build --skip-upload -u --max 240 --quiet 2.0
+
 # Return to Mode 1 for the remaining Mode-1-only commands.
 run_step \
   "cmd_mode1" \
