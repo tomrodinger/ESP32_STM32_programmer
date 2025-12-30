@@ -11,6 +11,7 @@
 #include <Communication.h>
 
 #include "firmware_fs.h"
+#include "program_state.h"
 #include "tee_log.h"
 
 // Route all prints in this file into the RAM terminal buffer as well.
@@ -45,25 +46,25 @@ static bool read_all(File &f, uint8_t *dst, size_t n) {
   return true;
 }
 
-static bool auto_select_sm_firmware_path(String &out_path) {
+static bool select_sm_firmware_path(String &out_path) {
   out_path = "";
-  String names[2];
-  size_t count = 0;
-  if (!firmware_fs::list_servomotor_firmware_basenames(names, 2, &count)) return false;
 
-  if (count == 0) {
-    Serial.println("ERROR: no SM* servomotor firmware file found on SPIFFS");
-    return false;
-  }
-  if (count > 1) {
-    Serial.println("ERROR: multiple SM* servomotor firmware files found; refusing to choose");
-    if (names[0].length()) Serial.printf("  - %s\n", names[0].c_str());
-    if (names[1].length()) Serial.printf("  - %s\n", names[1].c_str());
-    Serial.println("(remove extras or make selection deterministic)");
-    return false;
+  // Prefer the cached selection (usually set by the web UI).
+  const String cached = program_state::servomotor_firmware_filename();
+  if (cached.length() > 0) {
+    out_path = cached;
+    return true;
   }
 
-  out_path = String("/") + names[0];
+  // Fall back to persisted active selection (and auto-select if exactly one SM* exists).
+  bool auto_sel = false;
+  if (!firmware_fs::reconcile_active_servomotor_selection_ex(&out_path, &auto_sel)) {
+    Serial.println("ERROR: servomotor firmware not selected (use WiFi UI)");
+    return false;
+  }
+
+  // Cache it for status/UI.
+  program_state::set_servomotor_firmware_filename(out_path);
   return true;
 }
 
@@ -82,7 +83,7 @@ bool upgrade_main_firmware_by_unique_id(Servomotor &motor, uint64_t unique_id, c
   if (firmware_path && firmware_path[0] != 0) {
     path = String(firmware_path);
   } else {
-    if (!auto_select_sm_firmware_path(path)) return false;
+    if (!select_sm_firmware_path(path)) return false;
   }
 
   File f = SPIFFS.open(path, "r");

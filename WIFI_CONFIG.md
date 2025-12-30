@@ -72,6 +72,47 @@ The Web UI provides firmware management controls:
   - Delete requires a **confirmation popup** to prevent accidental clicks.
   - If the deleted file was active, selection is cleared and the auto-selection rules apply.
 
+## Feature: servomotor main firmware management from the Web UI (upload + store multiple + select active + delete)
+
+In addition to the STM32 bootloader images (`BL*`), the device can store servomotor main firmware images used for RS485 upgrade.
+
+- Stored servomotor firmware files are identified by basename pattern: `SM*`
+- One `SM*` file can be marked as **active** and will be used by Mode 2 upgrade (`u`).
+- The active selection is stored **non-volatile** (persisted on the filesystem).
+
+### Auto-selection rules (state machine)
+
+Same policy as `BL*` selection:
+
+1) **Boot-time**
+   - If a persisted `SM*` selection exists and the file still exists, it becomes active.
+   - If the persisted selection is missing/invalid:
+     - If there is **exactly one** `SM*` file, it is automatically selected.
+     - Otherwise the selection is empty.
+
+2) **After upload / delete**
+   - If the active `SM*` file is deleted, selection is cleared unless exactly one `SM*` remains, in which case it is auto-selected.
+
+### Upload rules (filename normalization)
+
+To fit SPIFFS object name limits, uploaded servomotor firmware filenames are normalized:
+
+1) The incoming filename must start with the literal prefix `servomotor` (case-sensitive) or `SM`.
+2) The stored filename is derived by:
+   - Replacing the leading `servomotor` with `SM`.
+   - Removing a trailing `.firmware` extension (case-sensitive) if present.
+3) The resulting stored **basename** (no leading `/`) must be **31 characters or fewer**.
+   - If it is still too long after normalization, the upload is rejected and an error is returned.
+4) The stored file is written into the filesystem root as `/<basename>`.
+
+## Web UI layout
+
+The web UI groups controls into these sections (top to bottom):
+
+1) **Serial Number Management**
+2) **Bootloader Management** (BL*)
+3) **Firmware Management** (SM*)
+
 ## Implementation status (this repo)
 
 - Serial log is implemented at [`serial_log::begin()`](src/serial_log.cpp:73) and stored at `/log.txt` on the `fwfs` SPIFFS partition.

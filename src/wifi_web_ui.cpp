@@ -30,6 +30,10 @@ namespace wifi_web_ui {
 static WebServer g_server(80);
 static bool g_started = false;
 
+// Forward declarations (needed because some route helpers are defined before the concrete handlers).
+static void send_status_json();
+static bool parse_json_string_field(const String &body, const char *field, String &out_value);
+
 static bool parse_http_range_bytes(const String &range, size_t total_len, size_t *out_start, size_t *out_len) {
   if (out_start) *out_start = 0;
   if (out_len) *out_len = total_len;
@@ -286,28 +290,45 @@ static const char k_index_html[] PROGMEM =
     "<style>body{font-family:system-ui;margin:16px}code{background:#f3f3f3;padding:2px 4px}</style>"
     "</head><body>"
     "<h2>Gearotons M17 Programming and Testing Jig</h2>"
-    "<p>Firmware file (active): <code id='fw'>...</code></p>"
+    "<p>Bootloader file (active): <code id='fw'>...</code></p>"
+    "<p>Firmware file (active): <code id='smfw'>...</code></p>"
     "<p>Next serial: <code id='sn'>...</code></p>"
     "<p>Filesystem free: <code id='fsfree'>...</code> bytes (est. <code id='unitsleft'>...</code> units left)</p>"
     "<p>Memory: <code id='memline'>...</code> <button onclick='refreshMem()'>Refresh</button></p>"
     "<p>Programming enabled: <code id='progok'>...</code></p>"
     "<hr/>"
-    "<h3>Firmware management</h3>"
+    "<h3>Serial Number Management</h3>"
+    "<div style='margin-top:8px'>"
+    "  <input id='setv' type='number' min='0' step='1' style='width:220px' placeholder='Set next serial'/>"
+    "  <button onclick='setSerial()'>Set</button>"
+    "</div>"
+    "<hr/>"
+    "<h3>Bootloader Management</h3>"
     "<div style='display:flex;gap:12px;flex-wrap:wrap;align-items:flex-start'>"
     "  <div style='flex:1;min-width:320px'>"
     "    <div style='margin-bottom:6px'>Stored BL* files:</div>"
     "    <div id='fwfiles' style='border:1px solid #ccc;padding:8px'></div>"
     "  </div>"
     "  <div style='flex:1;min-width:320px'>"
-    "    <div style='margin-bottom:6px'>Upload new firmware (.bin):</div>"
+    "    <div style='margin-bottom:6px'>Upload new bootloader (.bin):</div>"
     "    <input id='fwup' type='file' accept='.bin,application/octet-stream'/>"
-    "    <button onclick='uploadFw()' style='margin-left:8px'>Upload</button>"
+    "    <button onclick=\"uploadFile('boot')\" style='margin-left:8px'>Upload</button>"
     "    <div id='fwupmsg' style='margin-top:6px;white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace'></div>"
     "  </div>"
     "</div>"
-    "<div style='margin-top:12px'>"
-    "  <input id='setv' type='number' min='0' step='1' style='width:220px' placeholder='Set next serial'/>"
-    "  <button onclick='setSerial()'>Set</button>"
+    "<hr/>"
+    "<h3>Firmware Management</h3>"
+    "<div style='display:flex;gap:12px;flex-wrap:wrap;align-items:flex-start'>"
+    "  <div style='flex:1;min-width:320px'>"
+    "    <div style='margin-bottom:6px'>Stored SM* files:</div>"
+    "    <div id='smfwfiles' style='border:1px solid #ccc;padding:8px'></div>"
+    "  </div>"
+    "  <div style='flex:1;min-width:320px'>"
+    "    <div style='margin-bottom:6px'>Upload new firmware (.firmware):</div>"
+    "    <input id='smfwup' type='file' accept='.firmware,application/octet-stream'/>"
+    "    <button onclick=\"uploadFile('sm')\" style='margin-left:8px'>Upload</button>"
+    "    <div id='smfwupmsg' style='margin-top:6px;white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace'></div>"
+    "  </div>"
     "</div>"
     "<div style='margin-top:12px'>"
     "  <div>Current status:</div>"
@@ -338,58 +359,82 @@ static const char k_index_html[] PROGMEM =
     "<div id='ramlogbox' style='margin-top:6px;white-space:pre;font-family:ui-monospace,Menlo,monospace;'"
     "background:#f7f7f7;border:1px solid #ddd;padding:8px;max-height:280px;overflow:auto'></div>"
     "<script>\n"
+    "const KINDS={\n"
+    "  boot:{\n"
+    "    list:'/api/firmware/list',select:'/api/firmware/select',del:'/api/firmware/delete',upload:'/api/firmware/upload',\n"
+    "    box:'fwfiles',radio:'fwsel',file:'fwup',msg:'fwupmsg'\n"
+    "  },\n"
+    "  sm:{\n"
+    "    list:'/api/servomotor_firmware/list',select:'/api/servomotor_firmware/select',del:'/api/servomotor_firmware/delete',upload:'/api/servomotor_firmware/upload',\n"
+    "    box:'smfwfiles',radio:'smfwsel',file:'smfwup',msg:'smfwupmsg'\n"
+    "  }\n"
+    "};\n"
+    // Avoid literal '"' in this C++ string by using charcode 34.
+    "function htmlEscape(s){return String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll(String.fromCharCode(34),'&quot;');}\n"
+    "function renderList(kindKey,j){\n"
+    "  const k=KINDS[kindKey];\n"
+    "  const box=document.getElementById(k.box);\n"
+    "  const files=(j&&j.files)?j.files:[];\n"
+    "  const active=(j&&j.active)?j.active:'';\n"
+    "  if(files.length===0){box.textContent='(none)';return;}\n"
+    "  let h='';\n"
+    "  for(const f of files){\n"
+    "    const checked=(f===active)?'checked':'';\n"
+    "    const fe=htmlEscape(f);\n"
+    "    h += '<div style=\"display:flex;gap:8px;align-items:center;margin:4px 0\">' +\n"
+    "         '<input type=\"radio\" name=\"'+k.radio+'\" value=\"'+fe+'\" '+checked+' onchange=\"selectFile(\\\''+kindKey+'\\\',this.value)\"/>' +\n"
+    "         '<code style=\"flex:1\">'+fe+'</code>' +\n"
+    "         '<button data-name=\"'+fe+'\" onclick=\"deleteFile(\\\''+kindKey+'\\\',this.dataset.name)\">Delete</button>' +\n"
+    "         '</div>';\n"
+    "  }\n"
+    "  box.innerHTML=h;\n"
+    "}\n"
+    "async function refreshList(kindKey){\n"
+    "  const k=KINDS[kindKey];\n"
+    "  const r=await fetch(k.list);\n"
+    "  const j=await r.json();\n"
+    "  renderList(kindKey,j);\n"
+    "}\n"
+    "async function selectFile(kindKey,name){\n"
+    "  const k=KINDS[kindKey];\n"
+    "  const r=await fetch(k.select,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({basename:name})});\n"
+    "  const t=await r.text();\n"
+    "  document.getElementById('statusjson').textContent=t;\n"
+    "  refresh();\n"
+    "}\n"
+    "async function deleteFile(kindKey,name){\n"
+    "  const k=KINDS[kindKey];\n"
+    "  if(!confirm('Delete firmware file '+name+' ?')) return;\n"
+    "  const r=await fetch(k.del,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({basename:name})});\n"
+    "  const t=await r.text();\n"
+    "  document.getElementById('statusjson').textContent=t;\n"
+    "  refresh();\n"
+    "}\n"
+    "async function uploadFile(kindKey){\n"
+    "  const k=KINDS[kindKey];\n"
+    "  const inp=document.getElementById(k.file);\n"
+    "  const msg=document.getElementById(k.msg);\n"
+    "  if(!inp.files||inp.files.length===0){msg.textContent='No file selected';return;}\n"
+    "  const f=inp.files[0];\n"
+    "  const fd=new FormData();\n"
+    "  fd.append('fw',f,f.name);\n"
+    "  const r=await fetch(k.upload,{method:'POST',body:fd});\n"
+    "  const t=await r.text();\n"
+    "  msg.textContent=t;\n"
+    "  refresh();\n"
+    "}\n"
     "async function refresh(){\n"
     "  const r=await fetch('/api/status');\n"
     "  const j=await r.json();\n"
     "  document.getElementById('fw').textContent=j.firmware_filename||'';\n"
     "  document.getElementById('sn').textContent=String(j.serial_next||0);\n"
+    "  document.getElementById('smfw').textContent=j.servomotor_firmware_filename||'';\n"
     "  document.getElementById('fsfree').textContent=String(j.fs_free_bytes||0);\n"
     "  document.getElementById('unitsleft').textContent=String(j.units_remaining_estimate||0);\n"
     "  document.getElementById('progok').textContent=(j.fs_ok? 'YES':'NO (select firmware)');\n"
     "  document.getElementById('statusjson').textContent=JSON.stringify(j);\n"
-    "  await refreshFwList();\n"
-    "}\n"
-    "async function refreshFwList(){\n"
-    "  const r=await fetch('/api/firmware/list');\n"
-    "  const j=await r.json();\n"
-    "  const box=document.getElementById('fwfiles');\n"
-    "  const files=j.files||[];\n"
-    "  const active=j.active||'';\n"
-    "  if(files.length===0){box.textContent='(none)';return;}\n"
-    "  let h='';\n"
-    "  for(const f of files){\n"
-    "    const checked=(f===active)?'checked':'';\n"
-    "    h += '<div style=\"display:flex;gap:8px;align-items:center;margin:4px 0\">' +\n"
-    "         '<input type=\"radio\" name=\"fwsel\" value=\"' + f + '\" ' + checked + ' onchange=\"selectFw(this.value)\"/>' +\n"
-    "         '<code style=\"flex:1\">' + f + '</code>' +\n"
-    "         '<button data-name=\"' + f + '\" onclick=\"deleteFw(this.dataset.name)\">Delete</button>' +\n"
-    "         '</div>';\n"
-    "  }\n"
-    "  box.innerHTML=h;\n"
-    "}\n"
-    "async function selectFw(name){\n"
-    "  const r=await fetch('/api/firmware/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({basename:name})});\n"
-    "  const t=await r.text();\n"
-    "  document.getElementById('statusjson').textContent=t;\n"
-    "  refresh();\n"
-    "}\n"
-    "async function deleteFw(name){\n"
-    "  if(!confirm('Delete firmware file '+name+' ?')) return;\n"
-    "  const r=await fetch('/api/firmware/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({basename:name})});\n"
-    "  const t=await r.text();\n"
-    "  document.getElementById('statusjson').textContent=t;\n"
-    "  refresh();\n"
-    "}\n"
-    "async function uploadFw(){\n"
-    "  const inp=document.getElementById('fwup');\n"
-    "  if(!inp.files||inp.files.length===0){document.getElementById('fwupmsg').textContent='No file selected';return;}\n"
-    "  const f=inp.files[0];\n"
-    "  const fd=new FormData();\n"
-    "  fd.append('fw',f,f.name);\n"
-    "  const r=await fetch('/api/firmware/upload',{method:'POST',body:fd});\n"
-    "  const t=await r.text();\n"
-    "  document.getElementById('fwupmsg').textContent=t;\n"
-    "  refresh();\n"
+    "  await refreshList('boot');\n"
+    "  await refreshList('sm');\n"
     "}\n"
     "async function setSerial(){\n"
     "  const v=document.getElementById('setv').value;\n"
@@ -420,8 +465,269 @@ static const char k_index_html[] PROGMEM =
     "refresh();refreshMem();setInterval(refresh,3000);\n"
     "</script></body></html>\n";
 
+// ---- Web UI route helpers (bootloader + servomotor firmware share the same handlers) ----
+
+static const char *kind_list_route(firmware_fs::FileKind kind) {
+  switch (kind) {
+    case firmware_fs::FileKind::kBootloader:
+      return "/api/firmware/list";
+    case firmware_fs::FileKind::kServomotorFirmware:
+      return "/api/servomotor_firmware/list";
+  }
+  return nullptr;
+}
+
+static const char *kind_select_route(firmware_fs::FileKind kind) {
+  switch (kind) {
+    case firmware_fs::FileKind::kBootloader:
+      return "/api/firmware/select";
+    case firmware_fs::FileKind::kServomotorFirmware:
+      return "/api/servomotor_firmware/select";
+  }
+  return nullptr;
+}
+
+static const char *kind_delete_route(firmware_fs::FileKind kind) {
+  switch (kind) {
+    case firmware_fs::FileKind::kBootloader:
+      return "/api/firmware/delete";
+    case firmware_fs::FileKind::kServomotorFirmware:
+      return "/api/servomotor_firmware/delete";
+  }
+  return nullptr;
+}
+
+static const char *kind_upload_route(firmware_fs::FileKind kind) {
+  switch (kind) {
+    case firmware_fs::FileKind::kBootloader:
+      return "/api/firmware/upload";
+    case firmware_fs::FileKind::kServomotorFirmware:
+      return "/api/servomotor_firmware/upload";
+  }
+  return nullptr;
+}
+
+static const char *kind_basename_prefix(firmware_fs::FileKind kind) {
+  switch (kind) {
+    case firmware_fs::FileKind::kBootloader:
+      return "BL";
+    case firmware_fs::FileKind::kServomotorFirmware:
+      return "SM";
+  }
+  return "";
+}
+
+static const char *kind_event_autoselect(firmware_fs::FileKind kind) {
+  switch (kind) {
+    case firmware_fs::FileKind::kBootloader:
+      return "AUTOSELECT";
+    case firmware_fs::FileKind::kServomotorFirmware:
+      return "AUTOSELECT_SM";
+  }
+  return "AUTOSELECT";
+}
+
+static const char *kind_event_userselect(firmware_fs::FileKind kind) {
+  switch (kind) {
+    case firmware_fs::FileKind::kBootloader:
+      return "USERSELECT";
+    case firmware_fs::FileKind::kServomotorFirmware:
+      return "USERSELECT_SM";
+  }
+  return "USERSELECT";
+}
+
+static String kind_cached_active_path(firmware_fs::FileKind kind) {
+  switch (kind) {
+    case firmware_fs::FileKind::kBootloader:
+      return program_state::firmware_filename();
+    case firmware_fs::FileKind::kServomotorFirmware:
+      return program_state::servomotor_firmware_filename();
+  }
+  return String("");
+}
+
+static void kind_set_cached_active_path(firmware_fs::FileKind kind, const String &path) {
+  switch (kind) {
+    case firmware_fs::FileKind::kBootloader:
+      program_state::set_firmware_filename(path);
+      break;
+    case firmware_fs::FileKind::kServomotorFirmware:
+      program_state::set_servomotor_firmware_filename(path);
+      break;
+  }
+}
+
+static void register_file_kind_routes(firmware_fs::FileKind kind) {
+  static File upload_file[2];
+  static String upload_target_path[2];
+  static String upload_err[2];
+
+  const uint8_t idx = (kind == firmware_fs::FileKind::kBootloader) ? 0u : 1u;
+
+  const char *list_route = kind_list_route(kind);
+  const char *select_route = kind_select_route(kind);
+  const char *delete_route = kind_delete_route(kind);
+  const char *upload_route = kind_upload_route(kind);
+  if (!list_route || !select_route || !delete_route || !upload_route) return;
+
+  g_server.on(list_route, HTTP_GET, [kind]() {
+    String active_path;
+    bool auto_sel = false;
+    (void)firmware_fs::reconcile_active_selection_ex(kind, &active_path, &auto_sel);
+    String active_base = active_path;
+    if (active_base.startsWith("/")) active_base = active_base.substring(1);
+
+    if (auto_sel && active_base.length() > 0) {
+      (void)serial_log::append_event(kind_event_autoselect(kind), active_base.c_str());
+    }
+
+    String names[32];
+    size_t count = 0;
+    if (!firmware_fs::list_basenames(kind, names, 32, &count)) {
+      g_server.send(500, "application/json", "{\"error\":\"fs_list_failed\"}");
+      return;
+    }
+
+    String json = "{";
+    json += "\"active\":\"" + active_base + "\",";
+    json += "\"files\":[";
+    for (size_t i = 0; i < count && i < 32; i++) {
+      if (i) json += ",";
+      json += "\"" + names[i] + "\"";
+    }
+    json += "]}";
+    g_server.send(200, "application/json", json);
+  });
+
+  g_server.on(select_route, HTTP_POST, [kind]() {
+    const String body = g_server.arg("plain");
+    String name;
+    if (!parse_json_string_field(body, "basename", name)) {
+      const String msg = String("Bad request: expected {basename:\"") + kind_basename_prefix(kind) + "...\"}\n";
+      g_server.send(400, "text/plain", msg);
+      return;
+    }
+
+    if (!firmware_fs::set_active_basename(kind, name)) {
+      g_server.send(400, "text/plain", "Failed to select firmware (missing/invalid?)\n");
+      return;
+    }
+
+    (void)serial_log::append_event(kind_event_userselect(kind), name.c_str());
+
+    String active;
+    (void)firmware_fs::reconcile_active_selection_ex(kind, &active, nullptr);
+    kind_set_cached_active_path(kind, active);
+    send_status_json();
+  });
+
+  g_server.on(delete_route, HTTP_POST, [kind]() {
+    const String body = g_server.arg("plain");
+    String name;
+    if (!parse_json_string_field(body, "basename", name)) {
+      const String msg = String("Bad request: expected {basename:\"") + kind_basename_prefix(kind) + "...\"}\n";
+      g_server.send(400, "text/plain", msg);
+      return;
+    }
+    const String path = String("/") + name;
+    if (!SPIFFS.exists(path)) {
+      g_server.send(404, "text/plain", "File not found\n");
+      return;
+    }
+
+    const String active_path = kind_cached_active_path(kind);
+    if (active_path == path) {
+      (void)firmware_fs::clear_active_selection(kind);
+      kind_set_cached_active_path(kind, "");
+    }
+
+    if (!SPIFFS.remove(path)) {
+      g_server.send(500, "text/plain", "Delete failed\n");
+      return;
+    }
+
+    String active;
+    bool auto_sel = false;
+    (void)firmware_fs::reconcile_active_selection_ex(kind, &active, &auto_sel);
+    kind_set_cached_active_path(kind, active);
+
+    if (auto_sel && active.startsWith("/")) {
+      const String b = active.substring(1);
+      if (b.length() > 0) (void)serial_log::append_event(kind_event_autoselect(kind), b.c_str());
+    }
+    send_status_json();
+  });
+
+  // Upload via multipart/form-data. Field name: "fw".
+  g_server.on(
+      upload_route, HTTP_POST,
+      [idx]() {
+        if (upload_err[idx].length() > 0) {
+          g_server.send(400, "text/plain", upload_err[idx] + "\n");
+          upload_err[idx] = "";
+          return;
+        }
+        g_server.send(200, "text/plain", "OK\n");
+      },
+      [kind, idx]() {
+        HTTPUpload &up = g_server.upload();
+        if (up.status == UPLOAD_FILE_START) {
+          upload_err[idx] = "";
+          upload_target_path[idx] = "";
+          if (upload_file[idx]) {
+            upload_file[idx].close();
+          }
+          String base;
+          String err;
+          if (!firmware_fs::normalize_uploaded_filename(kind, up.filename, base, &err)) {
+            upload_err[idx] = String("ERROR: ") + err;
+            return;
+          }
+          upload_target_path[idx] = String("/") + base;
+          upload_file[idx] = SPIFFS.open(upload_target_path[idx], "w");
+          if (!upload_file[idx]) {
+            upload_err[idx] = "ERROR: could not open file for write";
+            return;
+          }
+        } else if (up.status == UPLOAD_FILE_WRITE) {
+          if (upload_err[idx].length() > 0) return;
+          if (!upload_file[idx]) {
+            upload_err[idx] = "ERROR: upload file not open";
+            return;
+          }
+          const size_t w = upload_file[idx].write(up.buf, up.currentSize);
+          if (w != up.currentSize) {
+            upload_err[idx] = "ERROR: short write";
+            return;
+          }
+        } else if (up.status == UPLOAD_FILE_END) {
+          if (upload_file[idx]) {
+            upload_file[idx].flush();
+            upload_file[idx].close();
+          }
+          if (upload_err[idx].length() > 0) return;
+
+          // Auto-select if needed.
+          String active;
+          bool auto_sel = false;
+          (void)firmware_fs::reconcile_active_selection_ex(kind, &active, &auto_sel);
+          kind_set_cached_active_path(kind, active);
+
+          if (auto_sel && active.startsWith("/")) {
+            const String b = active.substring(1);
+            if (b.length() > 0) (void)serial_log::append_event(kind_event_autoselect(kind), b.c_str());
+          }
+        } else if (up.status == UPLOAD_FILE_ABORTED) {
+          if (upload_file[idx]) upload_file[idx].close();
+          upload_err[idx] = "ERROR: upload aborted";
+        }
+      });
+}
+
 static void send_status_json() {
   const String fw_path = program_state::firmware_filename();
+  const String sm_fw_path = program_state::servomotor_firmware_filename();
   const uint32_t sn = serial_log::serial_next();
 
   const size_t fs_total = (size_t)SPIFFS.totalBytes();
@@ -442,6 +748,12 @@ static void send_status_json() {
     json += "\"\"";
   }
   json += ",\"serial_next\":" + String((unsigned long)sn);
+  json += ",\"servomotor_firmware_filename\":";
+  if (sm_fw_path.length() > 0) {
+    json += "\"" + sm_fw_path + "\"";
+  } else {
+    json += "\"\"";
+  }
   json += ",\"fs_total_bytes\":" + String((unsigned long)fs_total);
   json += ",\"fs_used_bytes\":" + String((unsigned long)fs_used);
   json += ",\"fs_free_bytes\":" + String((unsigned long)fs_free);
@@ -515,162 +827,9 @@ static void setup_routes() {
   g_server.on("/api/mem", HTTP_GET, []() { send_mem_json(); });
   g_server.on("/api/serial", HTTP_POST, []() { handle_post_serial(); });
 
-  g_server.on("/api/firmware/list", HTTP_GET, []() {
-    String active_path;
-    bool auto_sel = false;
-    (void)firmware_fs::reconcile_active_selection_ex(&active_path, &auto_sel);
-    String active_base = active_path;
-    if (active_base.startsWith("/")) active_base = active_base.substring(1);
-
-    if (auto_sel && active_base.length() > 0) {
-      (void)serial_log::append_event("AUTOSELECT", active_base.c_str());
-    }
-
-    // Gather up to a reasonable number for UI.
-    String names[32];
-    size_t count = 0;
-    if (!firmware_fs::list_firmware_basenames(names, 32, &count)) {
-      g_server.send(500, "application/json", "{\"error\":\"fs_list_failed\"}");
-      return;
-    }
-
-    String json = "{";
-    json += "\"active\":\"" + active_base + "\",";
-    json += "\"files\":[";
-    for (size_t i = 0; i < count && i < 32; i++) {
-      if (i) json += ",";
-      json += "\"" + names[i] + "\"";
-    }
-    json += "]}";
-    g_server.send(200, "application/json", json);
-  });
-
-  g_server.on("/api/firmware/select", HTTP_POST, []() {
-    const String body = g_server.arg("plain");
-    String name;
-    if (!parse_json_string_field(body, "basename", name)) {
-      g_server.send(400, "text/plain", "Bad request: expected {basename:\"BL...\"}\n");
-      return;
-    }
-
-    if (!firmware_fs::set_active_firmware_basename(name)) {
-      g_server.send(400, "text/plain", "Failed to select firmware (missing/invalid?)\n");
-      return;
-    }
-
-    (void)serial_log::append_event("USERSELECT", name.c_str());
-
-    String active;
-    (void)firmware_fs::reconcile_active_selection(&active);
-    program_state::set_firmware_filename(active);
-    send_status_json();
-  });
-
-  g_server.on("/api/firmware/delete", HTTP_POST, []() {
-    const String body = g_server.arg("plain");
-    String name;
-    if (!parse_json_string_field(body, "basename", name)) {
-      g_server.send(400, "text/plain", "Bad request: expected {basename:\"BL...\"}\n");
-      return;
-    }
-    const String path = String("/") + name;
-    if (!SPIFFS.exists(path)) {
-      g_server.send(404, "text/plain", "File not found\n");
-      return;
-    }
-
-    // If deleting active file, clear selection first.
-    const String active_path = program_state::firmware_filename();
-    if (active_path == path) {
-      (void)firmware_fs::clear_active_firmware_selection();
-      program_state::set_firmware_filename("");
-    }
-
-    if (!SPIFFS.remove(path)) {
-      g_server.send(500, "text/plain", "Delete failed\n");
-      return;
-    }
-
-    String active;
-    bool auto_sel = false;
-    (void)firmware_fs::reconcile_active_selection_ex(&active, &auto_sel);
-    program_state::set_firmware_filename(active);
-
-    if (auto_sel && active.startsWith("/")) {
-      const String b = active.substring(1);
-      if (b.length() > 0) (void)serial_log::append_event("AUTOSELECT", b.c_str());
-    }
-    send_status_json();
-  });
-
-  // Firmware upload via multipart/form-data.
-  // Field name: "fw".
-  static File upload_file;
-  static String upload_target_path;
-  static String upload_err;
-  g_server.on(
-      "/api/firmware/upload", HTTP_POST,
-      []() {
-        if (upload_err.length() > 0) {
-          g_server.send(400, "text/plain", upload_err + "\n");
-          upload_err = "";
-          return;
-        }
-        g_server.send(200, "text/plain", "OK\n");
-      },
-      []() {
-        HTTPUpload &up = g_server.upload();
-        if (up.status == UPLOAD_FILE_START) {
-          upload_err = "";
-          upload_target_path = "";
-          if (upload_file) {
-            upload_file.close();
-          }
-          String base;
-          String err;
-          if (!firmware_fs::normalize_uploaded_firmware_filename(up.filename, base, &err)) {
-            upload_err = String("ERROR: ") + err;
-            return;
-          }
-          upload_target_path = String("/") + base;
-          upload_file = SPIFFS.open(upload_target_path, "w");
-          if (!upload_file) {
-            upload_err = "ERROR: could not open file for write";
-            return;
-          }
-        } else if (up.status == UPLOAD_FILE_WRITE) {
-          if (upload_err.length() > 0) return;
-          if (!upload_file) {
-            upload_err = "ERROR: upload file not open";
-            return;
-          }
-          const size_t w = upload_file.write(up.buf, up.currentSize);
-          if (w != up.currentSize) {
-            upload_err = "ERROR: short write";
-            return;
-          }
-        } else if (up.status == UPLOAD_FILE_END) {
-          if (upload_file) {
-            upload_file.flush();
-            upload_file.close();
-          }
-          if (upload_err.length() > 0) return;
-
-          // Auto-select if needed.
-          String active;
-          bool auto_sel = false;
-          (void)firmware_fs::reconcile_active_selection_ex(&active, &auto_sel);
-          program_state::set_firmware_filename(active);
-
-          if (auto_sel && active.startsWith("/")) {
-            const String b = active.substring(1);
-            if (b.length() > 0) (void)serial_log::append_event("AUTOSELECT", b.c_str());
-          }
-        } else if (up.status == UPLOAD_FILE_ABORTED) {
-          if (upload_file) upload_file.close();
-          upload_err = "ERROR: upload aborted";
-        }
-      });
+  // Register file-management endpoints.
+  register_file_kind_routes(firmware_fs::FileKind::kBootloader);
+  register_file_kind_routes(firmware_fs::FileKind::kServomotorFirmware);
   g_server.on("/api/logs", HTTP_GET, []() {
     // Simple combined view for in-browser viewing (full content).
     g_server.setContentLength(CONTENT_LENGTH_UNKNOWN);

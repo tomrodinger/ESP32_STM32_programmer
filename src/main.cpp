@@ -419,6 +419,7 @@ static bool select_servomotor_firmware_path(String &out_path) {
   bool auto_sel = false;
   const bool ok = firmware_fs::reconcile_active_servomotor_selection_ex(&out_path, &auto_sel);
   if (!ok) return false;
+  program_state::set_servomotor_firmware_filename(out_path);
   if (auto_sel && out_path.startsWith("/")) {
     const String base = out_path.substring(1);
     if (base.length() > 0) (void)serial_log::append_event("AUTOSELECT_SM", base.c_str());
@@ -768,6 +769,20 @@ void setup() {
     } else {
       program_state::set_firmware_filename("");
       LOG().println("Firmware selection: NOT SELECTED (use WiFi UI; programming disabled)");
+    }
+
+    // Servomotor main firmware selection (SM*) for Mode 2 upgrade.
+    String sm_fw_path;
+    bool sm_auto_sel = false;
+    if (firmware_fs::reconcile_active_servomotor_selection_ex(&sm_fw_path, &sm_auto_sel)) {
+      program_state::set_servomotor_firmware_filename(sm_fw_path);
+      if (sm_auto_sel) {
+        String base = sm_fw_path;
+        if (base.startsWith("/")) base = base.substring(1);
+        (void)serial_log::append_event("AUTOSELECT_SM", base.c_str());
+      }
+    } else {
+      program_state::set_servomotor_firmware_filename("");
     }
   }
 

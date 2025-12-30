@@ -4,6 +4,13 @@
 
 namespace firmware_fs {
 
+enum class FileKind : uint8_t {
+  // STM32 bootloader image used for SWD programming (stored as BL*).
+  kBootloader = 0,
+  // Servomotor main firmware used for RS485 upgrade (stored as SM*).
+  kServomotorFirmware = 1,
+};
+
 // SPIFFS object name length is limited (mkspiffs in this toolchain reports
 // SPIFFS_OBJ_NAME_LEN=32 including null terminator). We therefore enforce a
 // maximum basename length of 31 so that "/" + basename fits.
@@ -24,6 +31,9 @@ bool list_firmware_basenames(String *out, size_t out_cap, size_t *out_count);
 // Returns true if the filesystem root is accessible (even if list is empty).
 bool list_servomotor_firmware_basenames(String *out, size_t out_cap, size_t *out_count);
 
+// Generic enumerator for firmware files by kind.
+bool list_basenames(FileKind kind, String *out, size_t out_cap, size_t *out_count);
+
 // Location (within SPIFFS) where we persist the active firmware selection.
 // The file contains a single line: the selected firmware basename (no leading "/").
 const char *active_firmware_selection_path();
@@ -36,12 +46,24 @@ const char *active_firmware_selection_path();
 // - Result must be <= k_max_firmware_basename_len and contain no '/'.
 bool normalize_uploaded_firmware_filename(const String &incoming_filename, String &out_basename, String *out_err);
 
+// Generic normalizer for uploaded filenames by kind.
+//
+// - FileKind::kBootloader expects: bootloader* -> BL* and strips .bin (case-insensitive).
+// - FileKind::kServomotorFirmware expects: servomotor* -> SM* and strips .firmware (case-sensitive).
+bool normalize_uploaded_filename(FileKind kind, const String &incoming_filename, String &out_basename, String *out_err);
+
 // Persist active firmware selection by basename (no leading "/").
 // Returns false if name is invalid or cannot be written.
 bool set_active_firmware_basename(const String &basename);
 
+// Generic setter for active selection by kind.
+bool set_active_basename(FileKind kind, const String &basename);
+
 // Clear persisted active selection (if any). Returns true on success.
 bool clear_active_firmware_selection();
+
+// Generic clear-selection by kind.
+bool clear_active_selection(FileKind kind);
 
 // Determine active firmware file path (leading "/").
 // State machine:
@@ -49,6 +71,9 @@ bool clear_active_firmware_selection();
 // - Else, if there is exactly one BL* file, auto-select it (persist) and return it.
 // - Else return false (unselected; programming disabled).
 bool get_active_firmware_path(String &out_path);
+
+// Generic active-path resolver by kind.
+bool get_active_path(FileKind kind, String &out_path);
 
 // Ensure the persisted selection is consistent with filesystem contents.
 // Returns true if, after reconciliation, an active selection exists.
@@ -60,6 +85,9 @@ bool reconcile_active_selection(String *out_active_path);
 // If out_auto_selected is non-null, it is set to true only when the function
 // auto-selected and persisted a firmware file due to "exactly one BL*" policy.
 bool reconcile_active_selection_ex(String *out_active_path, bool *out_auto_selected);
+
+// Generic reconciler by kind.
+bool reconcile_active_selection_ex(FileKind kind, String *out_active_path, bool *out_auto_selected);
 
 // Active selection for servomotor main firmware file (SM*).
 bool get_active_servomotor_firmware_path(String &out_path);
