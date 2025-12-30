@@ -137,9 +137,14 @@ Mode 2 commands (for now):
 - `h` / `?` = help
 - `1` / `2` = mode switching
 - `R` = motor system reset (enter bootloader)
+- `D` = detect devices (broadcast)
 - `e` / `d` = enable/disable MOSFETs
 - `t` = trapezoid move (1 rotation for 1 second)
 - `p` = get comprehensive position (prints read-back values)
+- `P` = get comprehensive position for reference device (alias `X`)
+- `s` = get status (expects fatalErrorCode == 0)
+- `v` = get supply voltage (expects within 5% of 20V)
+- `c` = get temperature (expects within 20% of 30C)
 - `i` = get product info (RS485)
 - `u` = upgrade firmware over RS485 (unique ID addressing)
 

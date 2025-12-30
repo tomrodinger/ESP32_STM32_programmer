@@ -237,21 +237,48 @@ def _send_cmd_and_capture(ser: "serial.Serial", cmd_char: str, quiet_s: float, m
     else:
         # Mode 2 (RS485 testing)
         if lead == "p":
-            stop_markers = ["Servomotor GET_COMPREHENSIVE_POSITION response", "ERROR: getComprehensivePosition"]
+            stop_markers = [
+                "Servomotor GET_COMPREHENSIVE_POSITION response",
+                "ERROR: getComprehensivePosition",
+                "ERROR: DUT unique_id not known",
+            ]
+        elif lead == "P":
+            stop_markers = [
+                "Servomotor GET_COMPREHENSIVE_POSITION response",
+                "ERROR: getComprehensivePosition(ref)",
+            ]
         elif lead == "i":
-            stop_markers = ["Servomotor GET_PRODUCT_INFO response:", "ERROR: getProductInfo"]
+            stop_markers = ["Servomotor GET_PRODUCT_INFO response:", "ERROR: getProductInfo", "ERROR: DUT unique_id not known"]
         elif lead == "e":
-            stop_markers = ["[Motor] enableMosfets called.", "ERROR: enableMosfets"]
+            stop_markers = ["[Motor] enableMosfets called.", "ERROR: enableMosfets", "ERROR: DUT unique_id not known"]
         elif lead == "d":
-            stop_markers = ["[Motor] disableMosfets called.", "ERROR: disableMosfets"]
+            stop_markers = ["[Motor] disableMosfets called.", "ERROR: disableMosfets", "ERROR: DUT unique_id not known"]
         elif lead == "t":
-            stop_markers = ["[Motor] trapezoidMove", "ERROR: trapezoidMove"]
+            stop_markers = ["[Motor] trapezoidMove", "ERROR: trapezoidMove", "ERROR: DUT unique_id not known"]
         elif lead == "R":
-            stop_markers = ["[Motor] systemReset called.", "ERROR: systemReset"]
+            stop_markers = ["[Motor] systemReset called.", "ERROR: systemReset", "ERROR: DUT unique_id not known"]
+        elif lead == "s":
+            stop_markers = ["Mode2 getStatus OK", "Mode2 getStatus FAIL", "ERROR: getStatus", "ERROR: DUT unique_id not known"]
+        elif lead == "v":
+            stop_markers = [
+                "Mode2 getSupplyVoltage OK",
+                "Mode2 getSupplyVoltage FAIL",
+                "ERROR: getSupplyVoltage",
+                "ERROR: DUT unique_id not known",
+            ]
+        elif lead == "c":
+            stop_markers = [
+                "Mode2 getTemperature OK",
+                "Mode2 getTemperature FAIL",
+                "ERROR: getTemperature",
+                "ERROR: DUT unique_id not known",
+            ]
+        elif lead == "D":
+            stop_markers = ["Detect devices:", "ERROR: detectDevices"]
 
     # Firmware upgrade is also long-running and can have multi-second stretches
     # without output (device flash write), so do not apply quiet-time early exit.
-    long_running = lead in {"e", "w", "v", " ", "u"} if mode == 1 else lead in {"u", "p", "i", "e", "d", "t", "R"}
+    long_running = lead in {"e", "w", "v", " ", "u"} if mode == 1 else lead in {"u", "p", "P", "i", "e", "d", "t", "R", "s", "v", "c", "D"}
     buf = ""
     while True:
         data = ser.read(4096)

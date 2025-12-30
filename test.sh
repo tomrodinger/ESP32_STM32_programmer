@@ -216,26 +216,77 @@ run_step_expect \
 run_step_expect \
   "mode2_cmd_p" \
   "Mode 2: get comprehensive position (command dispatch; motor may be absent; timeout OK)" \
-  "[Motor] getComprehensivePositionRaw called." \
+  "=== [Mode 2] User pressed 'p'" \
   "$PY" "$ROOT_DIR/tools/esp32_runner.py" --skip-build --skip-upload 2 p
+
+run_step_expect \
+  "mode2_cmd_P" \
+  "Mode 2: get comprehensive position for reference device (alias X)" \
+  "=== [Mode 2] User pressed 'P'" \
+  "$PY" "$ROOT_DIR/tools/esp32_runner.py" --skip-build --skip-upload 2 P
+
+run_step_expect \
+  "mode2_cmd_D" \
+  "Mode 2: detect devices (broadcast) prints all responses" \
+  "[Motor] detectDevices called." \
+  "$PY" "$ROOT_DIR/tools/esp32_runner.py" --skip-build --skip-upload 2 D
+
+run_step_expect \
+  "mode2_cmd_s" \
+  "Mode 2: get status (command dispatch; motor may be absent; timeout OK)" \
+  "=== [Mode 2] User pressed 's'" \
+  "$PY" "$ROOT_DIR/tools/esp32_runner.py" --skip-build --skip-upload 2 s
+
+run_step_expect \
+  "mode2_cmd_v" \
+  "Mode 2: get supply voltage (command dispatch; motor may be absent; timeout OK)" \
+  "=== [Mode 2] User pressed 'v'" \
+  "$PY" "$ROOT_DIR/tools/esp32_runner.py" --skip-build --skip-upload 2 v
+
+run_step_expect \
+  "mode2_cmd_c" \
+  "Mode 2: get temperature (command dispatch; motor may be absent; timeout OK)" \
+  "=== [Mode 2] User pressed 'c'" \
+  "$PY" "$ROOT_DIR/tools/esp32_runner.py" --skip-build --skip-upload 2 c
 
 run_step_expect \
   "mode2_cmd_e" \
   "Mode 2: enable MOSFETs (command dispatch; motor may be absent; timeout OK)" \
-  "[Motor] enableMosfets called." \
+  "=== [Mode 2] User pressed 'e'" \
   "$PY" "$ROOT_DIR/tools/esp32_runner.py" --skip-build --skip-upload 2 e
+{
+  loge="$TMP_LOG_DIR/mode2_cmd_e.log"
+  if ! grep -Eq -- "\\[Motor\\] enableMosfets called\\.|ERROR: DUT unique_id not known" "$loge"; then
+    fail "mode2_cmd_e (expected enableMosfets dispatch or unique_id error)" "$loge"
+  fi
+  success_box "mode2_cmd_e_expect" "saw enableMosfets dispatch or unique_id missing error"
+}
 
 run_step_expect \
   "mode2_cmd_d" \
   "Mode 2: disable MOSFETs (command dispatch; motor may be absent; timeout OK)" \
-  "[Motor] disableMosfets called." \
+  "=== [Mode 2] User pressed 'd'" \
   "$PY" "$ROOT_DIR/tools/esp32_runner.py" --skip-build --skip-upload 2 d
+{
+  logd="$TMP_LOG_DIR/mode2_cmd_d.log"
+  if ! grep -Eq -- "\\[Motor\\] disableMosfets called\\.|ERROR: DUT unique_id not known" "$logd"; then
+    fail "mode2_cmd_d (expected disableMosfets dispatch or unique_id error)" "$logd"
+  fi
+  success_box "mode2_cmd_d_expect" "saw disableMosfets dispatch or unique_id missing error"
+}
 
 run_step_expect \
   "mode2_cmd_R" \
   "Mode 2: system reset command is sent (should not crash even if motor absent)" \
-  "[Motor] systemReset called." \
+  "=== [Mode 2] User pressed 'R'" \
   "$PY" "$ROOT_DIR/tools/esp32_runner.py" --skip-build --skip-upload 2 R
+{
+  logr="$TMP_LOG_DIR/mode2_cmd_R.log"
+  if ! grep -Eq -- "\\[Motor\\] systemReset called\\.|ERROR: DUT unique_id not known" "$logr"; then
+    fail "mode2_cmd_R (expected systemReset dispatch or unique_id error)" "$logr"
+  fi
+  success_box "mode2_cmd_R_expect" "saw systemReset dispatch or unique_id missing error"
+}
 
 # Mode 2: trapezoid move may legitimately time out if no motor is connected.
 # Accept either a dispatch trace line (from the library wrapper) or an error line.
@@ -245,7 +296,7 @@ run_step \
   "$PY" "$ROOT_DIR/tools/esp32_runner.py" --skip-build --skip-upload 2 t
 {
   logt="$TMP_LOG_DIR/mode2_cmd_t.log"
-  if ! grep -Eq -- "\\[Motor\\] trapezoidMove|ERROR: trapezoidMove" "$logt"; then
+  if ! grep -Eq -- "\\[Motor\\] trapezoidMove|ERROR: trapezoidMove|ERROR: DUT unique_id not known" "$logt"; then
     fail "mode2_cmd_t (expected trapezoidMove dispatch or error output)" "$logt"
   fi
   success_box "mode2_cmd_t_expect" "saw trapezoidMove dispatch/error output"
@@ -348,7 +399,7 @@ run_step \
   "$PY" "$ROOT_DIR/tools/esp32_runner.py" --skip-build --skip-upload 2 i --max 10
 {
   logi="$TMP_LOG_DIR/cmd_mode2_i.log"
-  if ! grep -Eq -- "Servomotor GET_PRODUCT_INFO response:|ERROR: getProductInfo" "$logi"; then
+  if ! grep -Eq -- "Servomotor GET_PRODUCT_INFO response:|ERROR: getProductInfo|ERROR: DUT unique_id not known" "$logi"; then
     fail "cmd_mode2_i (expected GET_PRODUCT_INFO response or error output)" "$logi"
   fi
   success_box "cmd_mode2_i_expect" "saw getProductInfo response/error output"
