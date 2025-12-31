@@ -42,6 +42,7 @@ static void print_help() {
   LOG().println("  v = get supply voltage (expects within 5% of 20V)");
   LOG().println("  c = get temperature (expects within 20% of 30C)");
   LOG().println("  i = get product info (RS485)");
+  LOG().println("  l = LED test: turn GREEN+RED LEDs on solid (indefinite)");
   LOG().println("  u = upgrade firmware over RS485 (unique ID addressing)");
 }
 
@@ -114,6 +115,16 @@ static void cmd_trapezoid_move_1_rotation_1_second(Servomotor &motor) {
   // so these are expressed as 1 rotation over 1 second.
   motor.trapezoidMove(1.0f, 1.0f);
   print_motor_call_error("trapezoidMove", motor);
+}
+
+static void cmd_led_test_green_red_solid_indefinite(Servomotor &motor) {
+  // Servomotor firmware's TEST_MODE handling (from Servomotor/firmware/Src/main.c):
+  // - values 10..13 enter LED test mode by calling set_led_test_mode(testMode - 10)
+  // - set_led_test_mode() disables IRQs + MOSFETs, turns on LEDs per bitmask (green=1, red=2), then while(1)
+  // So testMode=13 => bitmask=3 => GREEN+RED on solid, indefinitely.
+  static constexpr uint8_t k_test_mode_green_red_solid_indefinite = 13;
+  motor.testMode(k_test_mode_green_red_solid_indefinite);
+  print_motor_call_error("testMode(GREEN+RED solid)", motor);
 }
 
 static void cmd_get_comprehensive_position(Servomotor &motor) {
@@ -408,6 +419,12 @@ void run() {
       case 'i':
         if (ensure_dut_unique_id_configured(motor)) {
           cmd_print_product_info(motor);
+        }
+        break;
+
+      case 'l':
+        if (ensure_dut_unique_id_configured(motor)) {
+          cmd_led_test_green_red_solid_indefinite(motor);
         }
         break;
 

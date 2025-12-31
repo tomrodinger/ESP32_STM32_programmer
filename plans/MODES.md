@@ -55,6 +55,7 @@ The `P` command (servomotor get product info) will be removed.
 | `2` | Switch to Mode 2 | Stay in Mode 2 (print banner) |
 | `h` | Print Mode 1 help | Print Mode 2 help |
 | `t` | Dump RAM terminal buffer | Trapezoid move (1 rotation for 1 second) |
+| `l` | Not available | LED test: GREEN+RED LEDs on solid (indefinite) |
 | `f,F,i,s,S,l,R,m,d,b,c,p,r,e,w,v,a,<space>` | Available | Not available |
 
 Mode 2 now uses `p` for comprehensive position and `i` for product info.
